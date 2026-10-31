@@ -275,6 +275,26 @@ namespace
         return passed;
     }
 
+    uint64_t startSpu2Dma(IopMemory &memory, bool autoDma)
+    {
+        memory.write16(0x1F9001B0u, static_cast<uint16_t>(autoDma ? 1u : 0u)); // core 0 ADMAS
+        memory.write32(0x1F8010C4u, (2u << 16u) | 0x100u);                     // 2 blocks of 0x100 words
+        memory.write32(0x1F8010C8u, 0x01000201u);                               // start, from memory
+        const auto start = memory.takeDmaStart();
+        return start ? start->delayCycles : 0u;
+    }
+
+    bool testSpu2AutoDmaCompletesAtPlaybackRate()
+    {
+        // ADX streaming waits for this interrupt between PCM blocks; finishing it at bus speed made the
+        // mixer thread spin and starve everything else at its priority.
+        IopMemory memory;
+        const uint64_t autoDelay = startSpu2Dma(memory, true);
+        const uint64_t plainDelay = startSpu2Dma(memory, false);
+        return expect(autoDelay == 0x200u * 768u, "AutoDMA should complete after 512 frames at 48 kHz") &&
+               expect(plainDelay == 0x200u * 2u, "a plain SPU2 DMA should keep its bus-speed delay");
+    }
+
     bool testTimrmanPeriodicCallback()
     {
         IopTimrman timrman;
@@ -402,7 +422,8 @@ namespace
 int main()
 {
     if (!testLoadcoreRebootLibraryMode() || !testCdvdSpecialControl() || !testCdvdSearchFile() ||
-        !testTimrmanPeriodicCallback() || !testSio2MemoryCard())
+        !testTimrmanPeriodicCallback() || !testSio2MemoryCard() ||
+        !testSpu2AutoDmaCompletesAtPlaybackRate())
         return 1;
     std::cout << "ps2xIOP import tests passed\n";
     return 0;

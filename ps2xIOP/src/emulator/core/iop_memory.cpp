@@ -17,6 +17,10 @@ namespace ps2x::iop::detail
         constexpr int kDmaSio2InIrq = 0x2C;
         constexpr int kDmaSio2OutIrq = 0x2D;
         constexpr uint64_t kSio2TransferCycles = 64u;
+        constexpr uint32_t kSpu2Core0Admas = 0x1F9001B0u;
+        constexpr uint32_t kSpu2Core1Admas = 0x1F9005B0u;
+        constexpr uint64_t kIopClockHzForSpu2 = 36'864'000ull;
+        constexpr uint64_t kSpu2SampleRate = 48'000ull;
 
         uint32_t alignUp(uint32_t value, uint32_t alignment)
         {
@@ -294,7 +298,17 @@ namespace ps2x::iop::detail
         const uint32_t wordsPerBlock = std::max<uint32_t>(blockControl & 0xFFFFu, 1u);
         const uint32_t blockCount = std::max<uint32_t>(blockControl >> 16u, 1u);
         const uint64_t transferWords = static_cast<uint64_t>(wordsPerBlock) * blockCount;
-        queueInterrupt(secondCore ? kDmaSpu1Irq : kDmaSpu0Irq, std::max<uint64_t>(transferWords * 2u, 64u));
+        // In AutoDMA (ADMAS set for this core) the SPU2 pulls PCM as it plays it: one 32-bit word is one
+        // 16-bit stereo frame at 48 kHz. Streaming drivers (CRI ADX) wait for this interrupt, so ending it
+        // at bus speed makes their mixer thread spin instead of blocking between blocks.
+        const uint32_t admasAddress = secondCore ? kSpu2Core1Admas : kSpu2Core0Admas;
+        uint32_t admas = 0u;
+        if (const auto current = m_hardware.find(admasAddress & ~3u); current != m_hardware.end())
+            admas = (current->second >> ((admasAddress & 2u) * 8u)) & 0xFFFFu;
+        const bool autoDma = (admas & (secondCore ? 2u : 1u)) != 0u;
+        const uint64_t delayCycles = autoDma ? transferWords * (kIopClockHzForSpu2 / kSpu2SampleRate)
+                                             : std::max<uint64_t>(transferWords * 2u, 64u);
+        queueInterrupt(secondCore ? kDmaSpu1Irq : kDmaSpu0Irq, delayCycles);
     }
 
     void IopMemory::queueInterrupt(int irq, uint64_t delayCycles)
