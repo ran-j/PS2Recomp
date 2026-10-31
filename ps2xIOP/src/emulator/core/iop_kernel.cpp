@@ -479,6 +479,16 @@ namespace ps2x::iop::detail
         return event == m_eventFlags.end() || bits == 0u || eventSatisfied(event->second, bits, mode);
     }
 
+    bool IopKernel::hasReadyAtOrAbove(int priority) const noexcept
+    {
+        for (const auto &[id, thread] : m_threads)
+        {
+            if (thread.state == IopThreadState::Ready && static_cast<int>(thread.priority) <= priority)
+                return true;
+        }
+        return false;
+    }
+
     bool IopKernel::semaphoreReady(int id) const
     {
         const auto semaphore = m_semaphores.find(id);

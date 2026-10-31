@@ -678,6 +678,22 @@ namespace ps2x::iop::detail
             totalInstructions = instructionsBefore;
         }
 
+        // The handler stands in for the server's own thread, which only gets the CPU once every ready
+        // thread that outranks it has blocked. Running it at once lets a stop request tear down objects
+        // a more urgent thread is still iterating (CRI's PSM thread then calls through a freed vtable).
+        RpcResult handleRpc(const RpcRequest &request)
+        {
+            const int priority = rpc.serverPriority(request.sid);
+            if (priority >= 0)
+            {
+                constexpr uint64_t kSliceCycles = 2048u;
+                const uint64_t giveUp = totalCycles + kIopClockHz; // a busy-looping thread must not hang the EE
+                while (kernel.hasReadyAtOrAbove(priority) && totalCycles < giveUp)
+                    runCycles(kSliceCycles);
+            }
+            return rpc.handleRpc(request, *this);
+        }
+
         void advanceSpu2()
         {
             constexpr size_t kFlushFrames = 512u;
@@ -909,7 +925,7 @@ namespace ps2x::iop::detail
 
     RpcResult IopEmulator::handleRpc(const RpcRequest &request)
     {
-        return m_impl->rpc.handleRpc(request, *m_impl);
+        return m_impl->handleRpc(request);
     }
 
     bool IopEmulator::hasRpcServer(uint32_t sid) const noexcept

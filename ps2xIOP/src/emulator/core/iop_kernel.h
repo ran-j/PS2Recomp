@@ -73,6 +73,14 @@ namespace ps2x::iop::detail
 
         [[nodiscard]] size_t threadCount() const noexcept { return m_threads.size(); }
         [[nodiscard]] bool inThread() const noexcept { return m_currentThread != nullptr; }
+        // Priority of the thread now running, or -1 outside any thread.
+        [[nodiscard]] int currentPriority() const noexcept
+        {
+            return m_currentThread != nullptr ? static_cast<int>(m_currentThread->priority) : -1;
+        }
+        // Whether a thread that would run before one of `priority` is ready (lower value = more urgent;
+        // without time-slicing an equal-priority thread that already runs keeps the CPU).
+        [[nodiscard]] bool hasReadyAtOrAbove(int priority) const noexcept;
         // Whether a WaitEventFlag / WaitSema issued now could return without blocking (unknown IDs count as
         // ready so the regular import reports the error).
         [[nodiscard]] bool eventFlagReady(int id, uint32_t bits, uint32_t mode) const;

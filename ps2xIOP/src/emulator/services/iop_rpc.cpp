@@ -220,6 +220,7 @@ namespace ps2x::iop::detail
             server.callback = m_memory.read32(stackPointer + 16u);
             server.callbackBuffer = m_memory.read32(stackPointer + 20u);
             server.queue = m_memory.read32(stackPointer + 24u);
+            server.priority = m_kernel.currentPriority();
             m_servers[server.sid] = server;
             if (server.serverData != 0u)
             {
@@ -355,6 +356,12 @@ namespace ps2x::iop::detail
             else
                 ++server;
         }
+    }
+
+    int IopRpcBridge::serverPriority(uint32_t sid) const noexcept
+    {
+        const auto server = m_servers.find(sid);
+        return server != m_servers.end() ? server->second.priority : -1;
     }
 
     bool IopRpcBridge::hasServer(uint32_t sid) const noexcept

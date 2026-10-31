@@ -363,6 +363,44 @@ namespace
                       "once interrupts are back on, the higher-priority thread must run");
     }
 
+    bool testRpcServerKeepsItsThreadPriority()
+    {
+        // An RPC handler stands in for its server thread, so the emulator must know that thread's
+        // priority to let more urgent threads finish first (CRI's PSM thread at 39 vs its RPC thread at 48).
+        NullHost host;
+        IopMemory memory;
+        IopKernel kernel(memory);
+        kernel.reset();
+        IopRpcBridge rpc(host, memory, kernel);
+        rpc.reset();
+
+        const int server = startTestThread(kernel, memory, 0x3000u, 0x10000u, 48u);
+        IopThread *running = kernel.beginNextReady(0u);
+        if (!expect(running != nullptr && running->id == server, "the server thread should run"))
+            return false;
+        IopCpuState cpu{};
+        cpu.gpr[4] = 0x4000u;     // server data
+        cpu.gpr[5] = 0x90000200u; // sid
+        cpu.gpr[6] = 0x10100u;    // function
+        cpu.gpr[29] = 0x5000u;
+        if (!expect(rpc.dispatchSifCmdImport(17u, cpu), "sceSifRegisterRpc was not handled") ||
+            !expect(rpc.serverPriority(0x90000200u) == 48, "the server should take its thread's priority"))
+            return false;
+        kernel.endTimeslice(*running, kThreadReturnSentinel);
+
+        cpu.gpr[5] = 0x90000201u;
+        if (!expect(rpc.dispatchSifCmdImport(17u, cpu), "sceSifRegisterRpc was not handled") ||
+            !expect(rpc.serverPriority(0x90000201u) == -1, "a server registered outside a thread has no priority"))
+            return false;
+
+        if (!expect(kernel.hasReadyAtOrAbove(48), "the server thread itself is ready at 48"))
+            return false;
+        const int mixer = startTestThread(kernel, memory, 0x3040u, 0x20000u, 39u);
+        return expect(mixer > 0, "the mixer thread should start") &&
+               expect(kernel.hasReadyAtOrAbove(39), "a ready priority-39 thread outranks a priority-48 server") &&
+               expect(!kernel.hasReadyAtOrAbove(30), "nothing ready outranks priority 30");
+    }
+
     uint64_t startSpu2Dma(IopMemory &memory, bool autoDma)
     {
         memory.write16(0x1F9001B0u, static_cast<uint16_t>(autoDma ? 1u : 0u)); // core 0 ADMAS
@@ -695,7 +733,8 @@ int main()
     if (!testLoadcoreRebootLibraryMode() || !testCdvdSpecialControl() || !testCdvdSearchFile() ||
         !testTimrmanPeriodicCallback() || !testSio2MemoryCard() || !testSliceEndDoesNotHandTheCpuToAnEqualPriorityThread() ||
         !testSliceEndInsideCpuSuspendIntrResumesSameThread() || !testSpu2AutoDmaCompletesAtPlaybackRate() ||
-        !testDmacmanDrivesSio2Dma() || !testSio2DualShock2() || !testSifGetOtherData() || !testUnalignedLoadPair())
+        !testDmacmanDrivesSio2Dma() || !testSio2DualShock2() || !testSifGetOtherData() || !testUnalignedLoadPair() ||
+        !testRpcServerKeepsItsThreadPriority())
         return 1;
     std::cout << "ps2xIOP import tests passed\n";
     return 0;
