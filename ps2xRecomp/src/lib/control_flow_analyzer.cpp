@@ -9,6 +9,51 @@
 
 namespace ps2recomp
 {
+    namespace
+    {
+        constexpr int kJumpTableBoundNearWindow = 30;
+        constexpr int kJumpTableBoundSearchLimit = 256;
+
+        // Destination GPR of the integer instructions that can sit between a jump-table bound check and
+        // the table load; anything else is treated as not touching the index register.
+        bool writesGpr(const Instruction &inst, uint32_t reg)
+        {
+            if (reg == 0u || !inst.modificationInfo.modifiesGPR)
+            {
+                return false;
+            }
+            switch (inst.opcode)
+            {
+            case OPCODE_SPECIAL:
+            case OPCODE_MMI:
+                return inst.rd == reg;
+            case OPCODE_JAL:
+                return reg == 31u;
+            default:
+                return inst.rt == reg;
+            }
+        }
+
+        // The delay slot of a branch-likely only runs when the branch is taken, so it cannot change a
+        // register on the fall-through path that reaches the jump-table load.
+        bool isBranchLikely(const Instruction &inst)
+        {
+            switch (inst.opcode)
+            {
+            case OPCODE_BEQL:
+            case OPCODE_BNEL:
+            case OPCODE_BLEZL:
+            case OPCODE_BGTZL:
+                return true;
+            case OPCODE_REGIMM:
+                return inst.rt == REGIMM_BLTZL || inst.rt == REGIMM_BGEZL ||
+                       inst.rt == REGIMM_BLTZALL || inst.rt == REGIMM_BGEZALL;
+            default:
+                return false;
+            }
+        }
+    }
+
     ControlFlowAnalyzer::ControlFlowAnalyzer(
         const std::vector<Section> &sections,
         const std::unordered_map<uint32_t, std::vector<uint32_t>> &configuredJumpTableTargetsByAddress,
@@ -312,12 +357,14 @@ namespace ps2recomp
                             }
 
                             uint32_t unshiftedIndexReg = 0;
+                            int sllIndex = -1;
                             for (int i = adduIndex - 1; i >= 0 && i >= adduIndex - 10; --i)
                             {
                                 const auto &inst = instructions[i];
                                 if (inst.opcode == OPCODE_SPECIAL && inst.function == SPECIAL_SLL && (inst.rd == tableBaseReg || inst.rd == indexReg))
                                 {
                                     unshiftedIndexReg = inst.rt;
+                                    sllIndex = i;
                                     break;
                                 }
                             }
@@ -325,12 +372,34 @@ namespace ps2recomp
                             uint32_t numCases = 0;
                             if (unshiftedIndexReg != 0)
                             {
-                                for (int i = adduIndex - 1; i >= 0 && i >= adduIndex - 30; --i)
+                                for (int i = adduIndex - 1; i >= 0 && i >= adduIndex - kJumpTableBoundNearWindow; --i)
                                 {
                                     const auto &inst = instructions[i];
                                     if ((inst.opcode == OPCODE_SLTIU || inst.opcode == OPCODE_SLTI) && inst.rs == unshiftedIndexReg)
                                     {
                                         numCases = inst.immediate;
+                                        break;
+                                    }
+                                }
+                            }
+                            if (numCases == 0 && sllIndex > 0)
+                            {
+                                // GCC can hoist the bound check far above the table load when it schedules a
+                                // long block in between. Past the near window, keep walking back only until
+                                // an instruction writes the index register, so a compare on an older value is
+                                // never taken as the bound. Start at the SLL: the index register is often
+                                // reused for the table base after it.
+                                for (int i = sllIndex - 1; i >= 0 && i >= sllIndex - kJumpTableBoundSearchLimit; --i)
+                                {
+                                    const auto &inst = instructions[i];
+                                    if ((inst.opcode == OPCODE_SLTIU || inst.opcode == OPCODE_SLTI) && inst.rs == unshiftedIndexReg)
+                                    {
+                                        numCases = inst.immediate;
+                                        break;
+                                    }
+                                    if (writesGpr(inst, unshiftedIndexReg) &&
+                                        !(i > 0 && isBranchLikely(instructions[i - 1])))
+                                    {
                                         break;
                                     }
                                 }

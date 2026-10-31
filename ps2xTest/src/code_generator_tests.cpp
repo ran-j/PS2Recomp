@@ -1850,6 +1850,136 @@ void register_code_generator_tests()
                      "unresolved non-RA JR should use indirect-jump diagnostics");
         });
 
+        tc.Run("JR jump table bound check far above the table load still resolves", [](TestCase &t) {
+            // Mana Khemia 0x1C1D90: SLTIU on the case index sits ~50 instructions above the table load,
+            // past a long scheduled prologue. Missing it left the JR unresolved, and a case target in the
+            // next function had no entry, so the game stopped when it took that case.
+            constexpr uint32_t tableAddress = 0x00200000u;
+            constexpr uint32_t start = 0x1700u;
+            constexpr uint32_t prologueLength = 60u;
+
+            Function func;
+            func.name = "jr_far_bound_jump_table";
+            func.start = start;
+            func.isRecompiled = true;
+            func.isStub = false;
+
+            std::vector<Instruction> instructions;
+            uint32_t address = start;
+            auto push = [&](Instruction inst)
+            {
+                inst.address = address;
+                address += 4u;
+                instructions.push_back(inst);
+            };
+
+            Instruction index{}; // addiu t4, a1, -4
+            index.opcode = OPCODE_ADDIU;
+            index.rs = 5;
+            index.rt = 12;
+            index.immediate = 0xFFFCu;
+            index.simmediate = 0xFFFFFFFCu;
+            index.modificationInfo.modifiesGPR = true;
+            push(index);
+
+            Instruction bound{}; // sltiu t5, t4, 3
+            bound.opcode = OPCODE_SLTIU;
+            bound.rs = 12;
+            bound.rt = 13;
+            bound.immediate = 3u;
+            bound.simmediate = 3u;
+            bound.modificationInfo.modifiesGPR = true;
+            push(bound);
+
+            for (uint32_t i = 0; i < prologueLength; ++i)
+                push(makeNop(0));
+
+            Instruction lui{}; // lui t6, hi(table)
+            lui.opcode = OPCODE_LUI;
+            lui.rt = 14;
+            lui.immediate = static_cast<uint16_t>(tableAddress >> 16);
+            push(lui);
+
+            Instruction sll{}; // sll t7, t4, 2
+            sll.opcode = OPCODE_SPECIAL;
+            sll.function = SPECIAL_SLL;
+            sll.rd = 15;
+            sll.rt = 12;
+            sll.sa = 2;
+            push(sll);
+
+            Instruction addiu{}; // addiu t6, t6, lo(table)
+            addiu.opcode = OPCODE_ADDIU;
+            addiu.rs = 14;
+            addiu.rt = 14;
+            addiu.immediate = static_cast<uint16_t>(tableAddress & 0xFFFFu);
+            addiu.simmediate = addiu.immediate;
+            push(addiu);
+
+            Instruction addu{}; // addu t7, t7, t6
+            addu.opcode = OPCODE_SPECIAL;
+            addu.function = SPECIAL_ADDU;
+            addu.rs = 15;
+            addu.rt = 14;
+            addu.rd = 15;
+            push(addu);
+
+            Instruction lw{}; // lw t7, 0(t7)
+            lw.opcode = OPCODE_LW;
+            lw.rs = 15;
+            lw.rt = 15;
+            push(lw);
+
+            const uint32_t jrAddress = address;
+            push(makeJr(0, 15));
+            push(makeNop(0));
+            const uint32_t case0 = address;
+            push(makeNop(0));
+            const uint32_t case1 = address;
+            push(makeNop(0));
+            const uint32_t case2 = address;
+            push(makeNop(0));
+            func.end = address;
+
+            std::vector<uint8_t> table(12u);
+            const uint32_t targets[3] = {case0, case1, case2};
+            std::memcpy(table.data(), targets, sizeof(targets));
+            Section rodata{};
+            rodata.name = ".rodata";
+            rodata.address = tableAddress;
+            rodata.size = static_cast<uint32_t>(table.size());
+            rodata.isData = true;
+            rodata.isReadOnly = true;
+            rodata.data = table.data();
+
+            const std::vector<Symbol> symbols;
+            const std::vector<Section> sections{rodata}; // CodeGenerator keeps a reference to these
+            CodeGenerator gen(symbols, sections);
+            CodeGenerator::AnalysisResult analysis = gen.collectInternalBranchTargets(func, instructions);
+            t.IsTrue(analysis.jumpTableTargets.contains(jrAddress),
+                     "a bound check above a long prologue should still size the jump table");
+            if (analysis.jumpTableTargets.contains(jrAddress))
+            {
+                t.Equals(analysis.jumpTableTargets.at(jrAddress).size(), static_cast<size_t>(3),
+                         "all three table targets should be resolved");
+            }
+
+            // Once the index register is overwritten after the compare, that bound no longer applies.
+            std::vector<Instruction> clobbered = instructions;
+            Instruction overwrite{}; // addiu t4, zero, 9
+            overwrite.address = clobbered[2].address;
+            overwrite.opcode = OPCODE_ADDIU;
+            overwrite.rs = 0;
+            overwrite.rt = 12;
+            overwrite.immediate = 9u;
+            overwrite.simmediate = 9u;
+            overwrite.modificationInfo.modifiesGPR = true;
+            clobbered[2] = overwrite;
+            CodeGenerator::AnalysisResult clobberedAnalysis = gen.collectInternalBranchTargets(func, clobbered);
+            t.IsFalse(clobberedAnalysis.jumpTableTargets.contains(jrAddress),
+                      "a compare on an overwritten index must not be taken as the table bound");
+        });
+
         tc.Run("configured jump table addresses drive JR dispatch targets", [](TestCase &t) {
             Function func;
             func.name = "jr_configured_jump_table";
