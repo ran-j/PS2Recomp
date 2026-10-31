@@ -1932,6 +1932,81 @@ void register_ps2_memory_tests()
             t.IsTrue(ct32Ok, "all CT32 pixels should survive a preceding paletted upload in the same GIF DMA chain");
         });
 
+        tc.Run("GIF DMA chain uploads CT24 column strips from per-macroblock REF tags", [](TestCase &t)
+        {
+            // Movie players upload a frame as 16-pixel-wide CT24 strips: one setup CNT that ends in the IMAGE
+            // GIFtag, then one REF per 16x16 macroblock (768 bytes = 48 qwords), strips side by side via DSAX.
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            GS gs;
+            gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
+            mem.setGifPacketCallback([&](const uint8_t *data, uint32_t sizeBytes)
+                                     { gs.processGIFPacket(data, sizeBytes); });
+
+            constexpr uint32_t kGifCh = 0x1000A000u;
+            constexpr uint32_t kChain = 0x00030000u;
+            constexpr uint32_t kData = 0x00040000u;
+            constexpr uint32_t kStrips = 3u;
+            constexpr uint32_t kBlocksPerStrip = 2u;
+            constexpr uint32_t kBlockBytes = 16u * 16u * 3u;
+            constexpr uint32_t kDbp = 0u;
+            constexpr uint32_t kDbw = 10u;
+
+            uint8_t *rdram = mem.getRDRAM();
+            for (uint32_t i = 0; i < kStrips * kBlocksPerStrip * kBlockBytes; ++i)
+                rdram[kData + i] = static_cast<uint8_t>((i * 7u) ^ (i >> 8u));
+
+            uint32_t chain = kChain;
+            for (uint32_t strip = 0; strip < kStrips; ++strip)
+            {
+                writeDmaTag(rdram, chain, makeDmaTag(6u, 1u, 0u, false)); // CNT: setup + IMAGE GIFtag.
+                chain += 16u;
+                writeU64(rdram, chain + 0u, makeGifTag(4u, GIF_FMT_PACKED, 1u, false));
+                writeU64(rdram, chain + 8u, 0x0Eull);
+                chain += 16u;
+                chain = writeGifAd(rdram, chain, makeBitbltbuf(kDbp, kDbw, GS_PSM_CT24), GS_REG_BITBLTBUF);
+                chain = writeGifAd(rdram, chain, static_cast<uint64_t>(strip * 16u) << 32, GS_REG_TRXPOS);
+                chain = writeGifAd(rdram, chain, 16ull | (static_cast<uint64_t>(16u * kBlocksPerStrip) << 32), GS_REG_TRXREG);
+                chain = writeGifAd(rdram, chain, 0ull, GS_REG_TRXDIR);
+                writeU64(rdram, chain + 0u, makeGifTag(static_cast<uint16_t>(kBlocksPerStrip * kBlockBytes / 16u), GIF_FMT_IMAGE, 0u, true));
+                writeU64(rdram, chain + 8u, 0ull);
+                chain += 16u;
+                for (uint32_t block = 0; block < kBlocksPerStrip; ++block)
+                {
+                    const uint32_t src = kData + (block * kStrips + strip) * kBlockBytes; // raster macroblock order
+                    writeDmaTag(rdram, chain, makeDmaTag(static_cast<uint16_t>(kBlockBytes / 16u), 3u, src, false));
+                    chain += 16u;
+                }
+            }
+            writeDmaTag(rdram, chain, makeDmaTag(0u, 7u, 0u, false)); // END.
+
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x30u, kChain), "write GIF TADR should succeed");
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x00u, 0x104u), "write GIF CHCR STR|CHAIN should succeed");
+            mem.processPendingTransfers();
+
+            bool ok = true;
+            for (uint32_t y = 0; y < 16u * kBlocksPerStrip && ok; ++y)
+            {
+                for (uint32_t x = 0; x < 16u * kStrips && ok; ++x)
+                {
+                    const uint32_t block = (y / 16u) * kStrips + (x / 16u);
+                    const uint32_t src = kData + block * kBlockBytes + ((y % 16u) * 16u + (x % 16u)) * 3u;
+                    const uint32_t dst = GSPSMCT32::addrPSMCT32(kDbp, kDbw, x, y);
+                    for (uint32_t c = 0; c < 3u; ++c)
+                    {
+                        if (mem.getGSVRAM()[dst + c] != rdram[src + c])
+                        {
+                            ok = false;
+                            t.IsTrue(false, "CT24 strip pixel mismatch at x=" + std::to_string(x) + " y=" + std::to_string(y));
+                            break;
+                        }
+                    }
+                }
+            }
+            t.IsTrue(ok, "every strip should land at its own DSAX with its own macroblocks");
+        });
+
         tc.Run("VIF1 DMA DIRECT forwards payload to GIF callback and clears channel", [](TestCase &t)
         {
             PS2Memory mem;
