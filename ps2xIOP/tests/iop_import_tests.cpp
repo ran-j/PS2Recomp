@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace
 {
@@ -328,10 +329,80 @@ namespace
     }
 }
 
+namespace
+{
+    // Sends one SIO2 packet the way sio2man does in PIO mode and returns the reply bytes.
+    std::vector<uint8_t> sio2Transfer(IopMemory &memory, const std::vector<uint8_t> &command)
+    {
+        memory.write32(0x1F808200u, static_cast<uint32_t>(command.size()) << 8u); // SEND3[0]: port 0, length
+        memory.write32(0x1F808204u, 0u);
+        for (const uint8_t value : command)
+            memory.write8(0x1F808260u, value);
+        memory.write32(0x1F808268u, 1u); // start
+        std::vector<uint8_t> reply(command.size());
+        for (uint8_t &value : reply)
+            value = memory.read8(0x1F808264u);
+        memory.write32(0x1F808280u, 1u); // acknowledge
+        return reply;
+    }
+
+    bool testSio2MemoryCard()
+    {
+        const std::filesystem::path image = std::filesystem::temp_directory_path() / "ps2x_sio2_test_card.ps2";
+        std::error_code ec;
+        std::filesystem::remove(image, ec);
+
+        IopMemory memory;
+        memory.attachMemoryCard(0, image.string());
+        if (!expect(!std::filesystem::exists(image), "the card image should not be created before SIO2 touches it"))
+            return false;
+
+        const std::vector<uint8_t> probe = sio2Transfer(memory, {0x81, 0x11, 0, 0});
+        bool irq17 = false;
+        while (const auto start = memory.takeDmaStart())
+            irq17 = irq17 || start->irq == 17;
+        if (!expect(irq17, "starting a SIO2 transfer should raise IRQ 17") ||
+            !expect(std::filesystem::file_size(image, ec) == 0x4000u * 528u, "a blank 8 MB card image with ECC should be created") ||
+            !expect(probe[2] == 0x2B && probe[3] == 0x55, "probe should answer 0x2B and the terminator") ||
+            !expect(memory.read32(0x1F80826Cu) == 0x1100u, "RECV1 should report a connected card"))
+            return false;
+
+        const std::vector<uint8_t> specs = sio2Transfer(memory, {0x81, 0x26, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0});
+        if (!expect(specs[3] == 0x00 && specs[4] == 0x02 && specs[5] == 0x10 && specs[8] == 0x40,
+                    "specs should report 512-byte pages, 16-page blocks and 0x4000 pages") ||
+            !expect(specs[11] == 0x52 && specs[12] == 0x55, "the spec checksum should XOR the eight spec bytes, then the terminator"))
+            return false;
+
+        // Program page 3, then read it back: flash writes only clear bits.
+        (void)sio2Transfer(memory, {0x81, 0x22, 3, 0, 0, 0, 3, 0, 0});
+        std::vector<uint8_t> write = {0x81, 0x42, 4, 0x12, 0x34, 0x56, 0x78, 0, 0, 0};
+        // Replies are as long as the request: two echo bytes, 0x00, 0x2B, the data, XOR and terminator.
+        (void)sio2Transfer(memory, write);
+        (void)sio2Transfer(memory, {0x81, 0x23, 3, 0, 0, 0, 3, 0, 0});
+        const std::vector<uint8_t> read = sio2Transfer(memory, {0x81, 0x43, 4, 0, 0, 0, 0, 0, 0, 0});
+        if (!expect(read[3] == 0x2B && read[4] == 0x12 && read[7] == 0x78 && read[9] == 0x55, "read data should return the programmed bytes") ||
+            !expect(read[8] == (0x12 ^ 0x34 ^ 0x56 ^ 0x78), "read data should end with the XOR checksum"))
+            return false;
+
+        // The write must survive reopening the image.
+        IopMemory reopened;
+        reopened.attachMemoryCard(0, image.string());
+        (void)sio2Transfer(reopened, {0x81, 0x23, 3, 0, 0, 0, 3, 0, 0});
+        const std::vector<uint8_t> persisted = sio2Transfer(reopened, {0x81, 0x43, 4, 0, 0, 0, 0, 0, 0, 0});
+        (void)sio2Transfer(reopened, {0x81, 0x21, 0, 0, 0, 0, 0, 0, 0});
+        (void)sio2Transfer(reopened, {0x81, 0x82, 0, 0});
+        (void)sio2Transfer(reopened, {0x81, 0x23, 3, 0, 0, 0, 3, 0, 0});
+        const std::vector<uint8_t> erased = sio2Transfer(reopened, {0x81, 0x43, 4, 0, 0, 0, 0, 0, 0, 0});
+        std::filesystem::remove(image, ec);
+        return expect(persisted[4] == 0x12, "programmed pages should persist in the image file") &&
+               expect(erased[4] == 0xFF && erased[7] == 0xFF, "erasing block 0 should reset page 3 to 0xFF");
+    }
+}
+
 int main()
 {
     if (!testLoadcoreRebootLibraryMode() || !testCdvdSpecialControl() || !testCdvdSearchFile() ||
-        !testTimrmanPeriodicCallback())
+        !testTimrmanPeriodicCallback() || !testSio2MemoryCard())
         return 1;
     std::cout << "ps2xIOP import tests passed\n";
     return 0;

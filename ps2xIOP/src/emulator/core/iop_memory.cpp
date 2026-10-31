@@ -12,6 +12,11 @@ namespace ps2x::iop::detail
         constexpr uint32_t kDmaStart = 1u << 24u;
         constexpr int kDmaSpu0Irq = 0x24;
         constexpr int kDmaSpu1Irq = 0x28;
+        constexpr uint32_t kDmaSio2InChcr = 0x1F801548u;
+        constexpr uint32_t kDmaSio2OutChcr = 0x1F801558u;
+        constexpr int kDmaSio2InIrq = 0x2C;
+        constexpr int kDmaSio2OutIrq = 0x2D;
+        constexpr uint64_t kSio2TransferCycles = 64u;
 
         uint32_t alignUp(uint32_t value, uint32_t alignment)
         {
@@ -35,7 +40,8 @@ namespace ps2x::iop::detail
         m_interruptStatus = 0;
         m_interruptMask = 0;
         m_interruptControl = 1;
-        m_dmaStart.reset();
+        m_dmaStarts.clear();
+        m_sio2.reset();
     }
 
     uint32_t IopMemory::physicalAddress(uint32_t address) noexcept
@@ -50,6 +56,8 @@ namespace ps2x::iop::detail
             return m_ram[phys];
         if (phys >= ScratchBase && phys < ScratchBase + ScratchSize)
             return m_scratch[phys - ScratchBase];
+        if (phys == IopSio2::kDataOut)
+            return m_sio2.readData();
         const uint32_t value = readHardware32(phys & ~3u);
         return static_cast<uint8_t>(value >> ((phys & 3u) * 8u));
     }
@@ -102,6 +110,11 @@ namespace ps2x::iop::detail
         if (phys >= ScratchBase && phys < ScratchBase + ScratchSize)
         {
             m_scratch[phys - ScratchBase] = value;
+            return;
+        }
+        if (phys == IopSio2::kDataIn)
+        {
+            m_sio2.writeData(value);
             return;
         }
         const uint32_t aligned = phys & ~3u;
@@ -212,6 +225,8 @@ namespace ps2x::iop::detail
 
     uint32_t IopMemory::readHardware32(uint32_t address) const
     {
+        if (IopSio2::contains(address))
+            return m_sio2.read32(address);
         const auto value = m_hardware.find(address);
         if (value != m_hardware.end())
             return value->second;
@@ -245,7 +260,18 @@ namespace ps2x::iop::detail
             break;
         }
 
+        if (IopSio2::contains(address))
+        {
+            writeSio2(address, value);
+            return;
+        }
+
         m_hardware[address] = value;
+        if (address == kDmaSio2InChcr || address == kDmaSio2OutChcr)
+        {
+            runSio2Dma(address, value);
+            return;
+        }
         if ((address != kDmaSpu0Chcr && address != kDmaSpu1Chcr) || (value & kDmaStart) == 0u)
             return;
 
@@ -268,17 +294,61 @@ namespace ps2x::iop::detail
         const uint32_t wordsPerBlock = std::max<uint32_t>(blockControl & 0xFFFFu, 1u);
         const uint32_t blockCount = std::max<uint32_t>(blockControl >> 16u, 1u);
         const uint64_t transferWords = static_cast<uint64_t>(wordsPerBlock) * blockCount;
-        m_dmaStart = DmaStart{
-            secondCore ? kDmaSpu1Irq : kDmaSpu0Irq,
-            std::max<uint64_t>(transferWords * 2u, 64u),
-        };
+        queueInterrupt(secondCore ? kDmaSpu1Irq : kDmaSpu0Irq, std::max<uint64_t>(transferWords * 2u, 64u));
+    }
+
+    void IopMemory::queueInterrupt(int irq, uint64_t delayCycles)
+    {
+        m_dmaStarts.push_back(DmaStart{irq, delayCycles});
     }
 
     std::optional<IopMemory::DmaStart> IopMemory::takeDmaStart() noexcept
     {
-        std::optional<DmaStart> result = m_dmaStart;
-        m_dmaStart.reset();
+        if (m_dmaStarts.empty())
+            return std::nullopt;
+        const DmaStart result = m_dmaStarts.front();
+        m_dmaStarts.pop_front();
         return result;
+    }
+
+    bool IopMemory::attachMemoryCard(size_t port, const std::string &path)
+    {
+        m_sio2.card(port).attach(path);
+        return true;
+    }
+
+    void IopMemory::writeSio2(uint32_t address, uint32_t value)
+    {
+        m_sio2.write32(address, value);
+        if (m_sio2.takeInterrupt())
+            queueInterrupt(IopSio2::kIrq, kSio2TransferCycles);
+    }
+
+    void IopMemory::runSio2Dma(uint32_t chcrAddress, uint32_t chcr)
+    {
+        if ((chcr & kDmaStart) == 0u)
+            return;
+        const uint32_t madrAddress = chcrAddress - 8u;
+        const uint32_t bcr = readHardware32(chcrAddress - 4u);
+        uint32_t madr = readHardware32(madrAddress) & 0x1FFFFFu;
+        const size_t blockSize = static_cast<size_t>(bcr & 0xFFFFu) * 4u;
+        const size_t size = blockSize * std::max<uint32_t>(bcr >> 16u, 1u);
+        if (madr + size <= RamSize)
+        {
+            if (chcrAddress == kDmaSio2InChcr)
+            {
+                m_sio2.dmaIn(m_ram.data() + madr, size, blockSize);
+            }
+            else
+            {
+                m_sio2.dmaOut(m_ram.data() + madr, size);
+                markOwned(madr, size);
+            }
+            madr += static_cast<uint32_t>(size);
+        }
+        m_hardware[madrAddress] = madr;
+        m_hardware[chcrAddress] = chcr & ~kDmaStart;
+        queueInterrupt(chcrAddress == kDmaSio2InChcr ? kDmaSio2InIrq : kDmaSio2OutIrq, std::max<uint64_t>(size / 4u, 64u));
     }
 
     uint32_t IopMemory::allocate(uint32_t size, uint32_t alignment, std::optional<uint32_t> fixed)

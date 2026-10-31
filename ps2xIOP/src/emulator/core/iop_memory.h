@@ -1,5 +1,10 @@
 #pragma once
 
+#include "iop_sio2.h"
+
+#include <deque>
+#include <string>
+
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -70,6 +75,8 @@ namespace ps2x::iop::detail
         void setInterruptControl(uint32_t value) noexcept { m_interruptControl = value & 1u; }
 
         [[nodiscard]] std::optional<DmaStart> takeDmaStart() noexcept;
+        // Attaches a raw memory card image to a SIO2 port; a missing file is created blank on first access.
+        bool attachMemoryCard(size_t port, const std::string &path);
         [[nodiscard]] std::span<const uint8_t> ram() const noexcept { return m_ram; }
 
         [[nodiscard]] static uint32_t physicalAddress(uint32_t address) noexcept;
@@ -78,6 +85,9 @@ namespace ps2x::iop::detail
         [[nodiscard]] uint32_t readHardware32(uint32_t address) const;
         void writeHardware32(uint32_t address, uint32_t value);
         void markOwned(uint32_t address, size_t size);
+        void writeSio2(uint32_t address, uint32_t value);
+        void runSio2Dma(uint32_t chcrAddress, uint32_t chcr);
+        void queueInterrupt(int irq, uint64_t delayCycles);
 
         std::vector<uint8_t> m_ram;
         std::vector<uint8_t> m_owned;
@@ -87,6 +97,8 @@ namespace ps2x::iop::detail
         uint32_t m_interruptStatus = 0;
         uint32_t m_interruptMask = 0;
         uint32_t m_interruptControl = 1;
-        std::optional<DmaStart> m_dmaStart;
+        std::deque<DmaStart> m_dmaStarts;
+        // SIO2 data reads pop its FIFO, so the controller changes even on const reads.
+        mutable IopSio2 m_sio2;
     };
 }

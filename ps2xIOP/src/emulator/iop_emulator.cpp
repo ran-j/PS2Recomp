@@ -117,6 +117,7 @@ namespace ps2x::iop::detail
         void reset()
         {
             memory.reset();
+            attachMemoryCard();
             kernel.reset();
             modules.clear();
             imports.reset();
@@ -174,9 +175,18 @@ namespace ps2x::iop::detail
             schedulePendingDma();
         }
 
+        void attachMemoryCard()
+        {
+            // Slot 1 is a raw card image next to the folder the HLE memory card services use.
+            const std::string root = host.hostPath(HostPathKind::MemoryCardRoot);
+            if (root.empty())
+                return;
+            (void)memory.attachMemoryCard(0, root + ".ps2");
+        }
+
         void schedulePendingDma()
         {
-            if (const auto dma = memory.takeDmaStart())
+            while (const auto dma = memory.takeDmaStart())
                 pendingDmaInterrupts[dma->irq] = totalCycles + dma->delayCycles;
         }
 
@@ -588,6 +598,27 @@ namespace ps2x::iop::detail
             }
         }
 
+        // Disc modules are loaded from anonymous buffers; their export table names what they are.
+        std::string exportedLibraryName(const Module &module) const
+        {
+            constexpr uint32_t kExportMagic = 0x41C00000u;
+            for (uint32_t address = module.base; address + 20u <= module.base + module.size; address += 4u)
+            {
+                if (memory.read32(address) != kExportMagic)
+                    continue;
+                std::string name;
+                for (uint32_t i = 0; i < 8u; ++i)
+                {
+                    const char c = static_cast<char>(memory.read8(address + 12u + i));
+                    if (c == '\0')
+                        break;
+                    name.push_back(c);
+                }
+                return name;
+            }
+            return {};
+        }
+
         ModuleLoadResult loadImage(std::string path, std::span<const uint8_t> image, const void *arguments, uint32_t argumentSize)
         {
             ModuleLoadResult result{true, -1, -1};
@@ -637,6 +668,8 @@ namespace ps2x::iop::detail
                 << " entry=0x" << std::hex << modules[result.moduleId].entry
                 << " base=0x" << modules[result.moduleId].base
                 << " start=" << std::dec << result.startResult;
+            if (const std::string library = exportedLibraryName(modules[result.moduleId]); !library.empty())
+                out << " exports=" << library;
             log(LogLevel::Info, out.str());
             return result;
         }
