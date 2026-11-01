@@ -353,7 +353,7 @@ else()
 endif()
 
 function(ps2x_stage_ffmpeg_runtime_dlls target_name)
-    if(NOT WIN32)
+    if(NOT WIN32 OR NOT PS2X_ENABLE_FFMPEG)
         return()
     endif()
 
