@@ -6,6 +6,7 @@
 #include "runtime/gs/ps2_gs_psmt4.h"
 #include "runtime/gs/ps2_gs_psmt8.h"
 #include "runtime/gs/ps2_gs_memory.h"
+#include "runtime/ps2_memory.h"
 #include "ps2_log.h"
 #include <atomic>
 #include <algorithm>
@@ -1251,11 +1252,39 @@ void GSCpuBackend::SetAsync(bool enabled)
     m_async = false;
 }
 
+void GSCpuBackend::SetDisplayRegisters(const GSRegisters *regs)
+{
+    std::lock_guard<std::mutex> lock(m_queueMutex);
+    m_displayRegs = regs;
+    m_lastQueuedVSync = regs ? regs->vsyncTick.load(std::memory_order_acquire) : 0u;
+}
+
 void GSCpuBackend::Enqueue(Command &&command)
 {
     {
         std::unique_lock<std::mutex> lock(m_queueMutex);
         m_queueProgress.wait(lock, [this]() { return m_queue.size() < kMaxQueuedCommands; });
+        // Nothing was queued since the vblank, so this stream position is the vblank itself.
+        if (m_displayRegs)
+        {
+            const uint64_t tick = m_displayRegs->vsyncTick.load(std::memory_order_acquire);
+            if (tick != m_lastQueuedVSync)
+            {
+                m_lastQueuedVSync = tick;
+                Command capture{};
+                capture.kind = Command::Kind::CaptureFrame;
+                capture.display.pmode = m_displayRegs->pmode;
+                capture.display.smode2 = m_displayRegs->smode2;
+                capture.display.dispfb1 = m_displayRegs->dispfb1;
+                capture.display.display1 = m_displayRegs->display1;
+                capture.display.dispfb2 = m_displayRegs->dispfb2;
+                capture.display.display2 = m_displayRegs->display2;
+                capture.display.bgcolor = m_displayRegs->bgcolor;
+                capture.display.vsyncTick = tick;
+                m_queue.push_back(std::move(capture));
+                ++m_queueSubmitted;
+            }
+        }
         m_queue.push_back(std::move(command));
         ++m_queueSubmitted;
     }
@@ -1336,6 +1365,9 @@ void GSCpuBackend::Execute(Command &command)
         break;
     case Command::Kind::WriteVram:
         WriteVramNow(command.args[0], command.args[1], command.args[2], command.args[3], command.args[4], command.args[5]);
+        break;
+    case Command::Kind::CaptureFrame:
+        CaptureFrameNow(command.display);
         break;
     }
 }
@@ -1718,6 +1750,21 @@ void GSCpuBackend::SnapshotVramNow(std::vector<uint8_t> &out) const
     }
     out.resize(m_vramSize);
     std::memcpy(out.data(), m_vram, m_vramSize);
+}
+
+void GSCpuBackend::CaptureFrameNow(const GSPresentationRequest &display)
+{
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        FlushPendingUnlocked();
+        if (!m_vram || m_vramSize == 0u)
+            return;
+        m_captureScratch.resize(m_vramSize);
+        std::memcpy(m_captureScratch.data(), m_vram, m_vramSize);
+    }
+    std::lock_guard<std::mutex> lock(m_captureMutex);
+    m_capturedVram.swap(m_captureScratch);
+    m_capturedDisplay = display;
 }
 
 GSTransferSnapshot GSCpuBackend::GetTransferSnapshotNow() const
@@ -3241,13 +3288,40 @@ PresentationFrame GSCpuBackend::Present(const GSPresentationRequest &request)
     // Snapshot local memory under the backend lock, then perform the expensive
     // display conversion without holding the producer-side raster lock.
     thread_local std::vector<uint8_t> snapshot;
-    SnapshotVramNow(snapshot);
+    GSPresentationRequest shown = request;
+    bool behind = false;
+    if (m_async)
+    {
+        std::lock_guard<std::mutex> lock(m_queueMutex);
+        behind = m_queueCompleted < m_queueSubmitted;
+    }
+    bool captured = false;
+    if (behind)
+    {
+        // Live memory would pair the guest's current DISPFB with a buffer still being drawn.
+        std::lock_guard<std::mutex> lock(m_captureMutex);
+        if (!m_capturedVram.empty())
+        {
+            snapshot = m_capturedVram;
+            shown.pmode = m_capturedDisplay.pmode;
+            shown.smode2 = m_capturedDisplay.smode2;
+            shown.dispfb1 = m_capturedDisplay.dispfb1;
+            shown.display1 = m_capturedDisplay.display1;
+            shown.dispfb2 = m_capturedDisplay.dispfb2;
+            shown.display2 = m_capturedDisplay.display2;
+            shown.bgcolor = m_capturedDisplay.bgcolor;
+            shown.vsyncTick = m_capturedDisplay.vsyncTick;
+            captured = true;
+        }
+    }
+    if (!captured)
+        SnapshotVramNow(snapshot);
     if (snapshot.empty())
         return {};
 
     thread_local GSCpuBackend snapshotBackend;
     snapshotBackend.Initialize(snapshot.data(), static_cast<uint32_t>(snapshot.size()));
-    return snapshotBackend.PresentFromLocalMemory(request);
+    return snapshotBackend.PresentFromLocalMemory(shown);
 }
 
 PresentationFrame GSCpuBackend::PresentFromLocalMemory(const GSPresentationRequest &request)

@@ -13,6 +13,8 @@
 #include <thread>
 #include <vector>
 
+struct GSRegisters;
+
 class GSCpuBackend final : public GSRasterBackend
 {
 public:
@@ -25,8 +27,13 @@ public:
 
     // Runs commands that only change local memory on a GS thread, in submission order, while the caller
     // continues; anything that reads local memory or transfer state first waits for the queue to drain,
-    // except presentation, which shows what has been drawn so far.
+    // except presentation, which shows the frame captured at the latest vblank the GS thread has reached.
     void SetAsync(bool enabled);
+
+    // The guest's privileged GS registers. While the GS thread lags behind the EE, DISPFB already names a
+    // buffer it is still clearing or drawing; local memory and the display registers are captured in
+    // stream order at each vblank so presentation shows a frame the guest had finished.
+    void SetDisplayRegisters(const GSRegisters *regs);
 
     void Initialize(uint8_t *vram, uint32_t vramSize) override;
     void Reset() override;
@@ -61,6 +68,7 @@ private:
             TextureFlush,
             ClearFramebuffer,
             WriteVram,
+            CaptureFrame,
         };
         Kind kind = Kind::Submit;
         GSPrimitiveBatch batch{};
@@ -69,6 +77,7 @@ private:
         GSTransferCommand transfer{};
         GSContext context{};
         uint32_t args[6]{};
+        GSPresentationRequest display{};
         std::vector<uint8_t> data;
     };
 
@@ -91,6 +100,7 @@ private:
     uint32_t ReadVramNow(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y) const;
     void WriteVramNow(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t value);
     void SnapshotVramNow(std::vector<uint8_t> &out) const;
+    void CaptureFrameNow(const GSPresentationRequest &display);
     GSTransferSnapshot GetTransferSnapshotNow() const;
 
     void ResetUnlocked();
@@ -302,6 +312,13 @@ private:
     uint64_t m_queueSubmitted = 0;
     uint64_t m_queueCompleted = 0;
     bool m_queueStop = false;
+    const GSRegisters *m_displayRegs = nullptr;
+    uint64_t m_lastQueuedVSync = 0;
+    // Written by the GS thread at each vblank in the stream, read by presentation.
+    mutable std::mutex m_captureMutex;
+    std::vector<uint8_t> m_capturedVram;
+    GSPresentationRequest m_capturedDisplay{};
+    std::vector<uint8_t> m_captureScratch;
     uint32_t m_rasterParticipants = 0;
     // Rebuilds the texture cache's copied page after a parallel draw into the page it holds.
     std::vector<uint8_t> m_pageRebuildScratch;

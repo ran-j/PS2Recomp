@@ -2396,6 +2396,7 @@ void PS2Runtime::run()
         {
             auto backend = std::make_unique<GSCpuBackend>();
             backend->SetAsync(true);
+            backend->SetDisplayRegisters(&m_memory.gs());
             m_gs.setRasterBackend(std::move(backend));
         }
     }

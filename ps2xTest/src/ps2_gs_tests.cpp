@@ -3469,6 +3469,69 @@ void register_ps2_gs_tests()
             t.IsTrue(serial == render(4u, true), "a GS thread must leave VRAM and the texture buffer as serially");
         });
 
+        tc.Run("GS thread presentation shows the frame finished at the latest vblank it reached", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GSRegisters regs{};
+            regs.pmode = 0x1ull;
+            regs.dispfb1 = 10ull << 9u;
+            regs.display1 = (639ull << 32u) | (447ull << 44u);
+
+            GSCpuBackend gs;
+            gs.Initialize(vram.data(), static_cast<uint32_t>(vram.size()));
+            gs.SetAsync(true);
+            gs.SetDisplayRegisters(&regs);
+
+            auto sprite = [&gs](uint32_t fbp, uint8_t r, bool blend)
+            {
+                GSPrimitiveBatch batch{};
+                batch.state.prim.type = GS_PRIM_SPRITE;
+                batch.state.prim.abe = blend;
+                batch.state.context.frame.fbp = fbp;
+                batch.state.context.frame.fbw = 10u;
+                batch.state.context.frame.psm = GS_PSM_CT32;
+                batch.state.context.scissor = {0u, 639u, 0u, 447u};
+                batch.state.context.zbuf.zmask = 1u;
+                batch.state.context.test = (1ull << 17u) | (1ull << 16u);
+                batch.state.context.alpha = 0x80ull << 32u | 0x44u;
+                batch.vertexCount = 2u;
+                batch.vertices[0].x = 0.0f;
+                batch.vertices[0].y = 0.0f;
+                batch.vertices[1].x = 640.0f;
+                batch.vertices[1].y = 448.0f;
+                for (GSVertex &vertex : batch.vertices)
+                {
+                    vertex.r = r;
+                    vertex.a = 0x40u;
+                }
+                gs.Submit(batch);
+            };
+
+            sprite(0u, 0xFFu, false);
+            regs.vsyncTick.store(1u);
+            sprite(150u, 0x00u, false);
+            std::vector<uint8_t> settled;
+            gs.SnapshotVram(settled);
+
+            // After the vblank the guest redraws the displayed buffer while the GS thread has a backlog.
+            sprite(0u, 0x00u, false);
+            for (int i = 0; i < 400; ++i)
+                sprite(150u, static_cast<uint8_t>(i), true);
+
+            GSPresentationRequest request{};
+            request.pmode = regs.pmode;
+            request.dispfb1 = regs.dispfb1;
+            request.display1 = regs.display1;
+            const PresentationFrame during = gs.Present(request);
+            t.IsTrue(!during.pixels.empty(), "presentation should produce a frame while the GS thread is busy");
+            t.Equals(static_cast<uint32_t>(during.pixels[0]), 0xFFu,
+                     "a lagging GS thread must present the buffer as it was at the vblank, not the one being redrawn");
+
+            gs.SnapshotVram(settled);
+            const PresentationFrame after = gs.Present(request);
+            t.Equals(static_cast<uint32_t>(after.pixels[0]), 0x00u, "once drained, presentation should show live memory");
+        });
+
         tc.Run("GS texture page buffer also hides draws into the cached page until TEXFLUSH", [](TestCase &t)
         {
             std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
