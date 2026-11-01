@@ -22,7 +22,7 @@ public:
     ~GSCpuBackend() override;
 
     // Threads (including the caller) that rasterize batched primitives; 0 picks the default
-    // (PS2X_GS_THREADS, else half the cores). 1 draws every primitive immediately.
+    // (PS2X_GS_THREADS, else all cores but two). 1 draws every primitive immediately.
     void SetRasterThreads(uint32_t participants);
 
     // Runs commands that only change local memory on a GS thread, in submission order, while the caller

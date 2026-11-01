@@ -721,8 +721,10 @@ namespace
         {
             if (const char *value = std::getenv("PS2X_GS_THREADS"))
                 return static_cast<uint32_t>(std::clamp(std::atoi(value), 1, 16));
+            // The EE game thread and the host window each need a core; 3D scenes are fill-rate bound and
+            // keep scaling with every raster thread up to that (20 -> 27 vblanks/s on 8 cores going 4 -> 6).
             const uint32_t cores = std::max(1u, std::thread::hardware_concurrency());
-            return std::clamp(cores / 2u, 1u, 6u);
+            return std::clamp(cores > 2u ? cores - 2u : 1u, 1u, 8u);
         }();
         return participants;
     }
