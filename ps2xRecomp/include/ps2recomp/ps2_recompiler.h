@@ -34,6 +34,7 @@ namespace ps2recomp
         bool recompile();
         void generateOutput();
         void printReport() const;
+        bool hasErrors() const { return m_reporter.hasErrors(); }
         const RecompilerReporter::Counters &reportCounters() const { return m_reporter.counters(); }
 
         static StubTarget resolveStubTarget(const std::string& name);

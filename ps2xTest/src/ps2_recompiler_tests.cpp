@@ -62,7 +62,8 @@ static Function makeFunction(const std::string &name, uint32_t start, uint32_t e
     return fn;
 }
 
-static bool writeMinimalMipsElfWithCodeAndDataFunctionSymbols(const std::filesystem::path &elfPath)
+static bool writeMinimalMipsElfWithCodeAndDataFunctionSymbols(const std::filesystem::path &elfPath,
+                                                            uint32_t firstWord = 0x03E00008u)
 {
     ELFIO::elfio writer;
     writer.create(ELFIO::ELFCLASS32, ELFIO::ELFDATA2LSB);
@@ -76,8 +77,8 @@ static bool writeMinimalMipsElfWithCodeAndDataFunctionSymbols(const std::filesys
     text->set_flags(ELFIO::SHF_ALLOC | ELFIO::SHF_EXECINSTR);
     text->set_addr_align(4);
     text->set_address(0x00100000u);
-    const char textBytes[] = {0x08, 0x00, static_cast<char>(0xE0), 0x03, 0x00, 0x00, 0x00, 0x00};
-    text->set_data(textBytes, sizeof(textBytes));
+    const std::array<uint32_t, 2> textWords{firstWord, 0u};
+    text->set_data(reinterpret_cast<const char *>(textWords.data()), sizeof(textWords));
 
     ELFIO::section *data = writer.sections.add(".data");
     data->set_type(ELFIO::SHT_PROGBITS);
@@ -807,6 +808,52 @@ void register_ps2_recompiler_tests()
 {
     MiniTest::Case("PS2Recompiler", [](TestCase &tc)
                    {
+        tc.Run("output diagnostics distinguish supported code from unhandled instructions", [](TestCase &t) {
+            const auto uniqueSuffix = std::to_string(
+                std::chrono::steady_clock::now().time_since_epoch().count());
+            const std::filesystem::path tempRoot =
+                std::filesystem::temp_directory_path() / ("ps2recomp-output-errors-" + uniqueSuffix);
+            std::filesystem::create_directories(tempRoot);
+
+            // COP3 is not an R5900 instruction. Decoding it still succeeds, and
+            // the error is reported only when the C++ throw is emitted.
+            for (const uint32_t firstWord : {0x03E00008u, 0x4C000000u})
+            {
+                const bool unsupported = firstWord == 0x4C000000u;
+                const auto elfPath = tempRoot / (unsupported ? "unsupported.elf" : "supported.elf");
+                const auto configPath = tempRoot / (unsupported ? "unsupported.toml" : "supported.toml");
+                const auto outputPath = tempRoot / (unsupported ? "unsupported" : "supported");
+                const bool inputsWritten =
+                    writeMinimalMipsElfWithCodeAndDataFunctionSymbols(elfPath, firstWord) &&
+                    writeRecompilerTestConfig(configPath, elfPath, outputPath, {});
+                t.IsTrue(inputsWritten, "synthetic output diagnostic inputs should be generated");
+                if (!inputsWritten)
+                    continue;
+
+                PS2Recompiler recompiler(configPath.string());
+                const bool initialized = recompiler.initialize();
+                t.IsTrue(initialized, "synthetic output diagnostic config should initialize");
+                if (!initialized)
+                    continue;
+                const bool recompiled = recompiler.recompile();
+                t.IsTrue(recompiled, "both input opcodes should reach code generation");
+                if (!recompiled)
+                    continue;
+                t.IsFalse(recompiler.hasErrors(), "decode alone should not report the codegen error");
+                recompiler.generateOutput();
+                t.Equals(recompiler.hasErrors(), unsupported,
+                         "codegen errors must remain observable after output generation");
+                t.Equals(recompiler.reportCounters().unhandledInstructions,
+                         static_cast<size_t>(unsupported ? 1u : 0u),
+                         "only the unsupported opcode should count as unhandled");
+                t.IsTrue(std::filesystem::exists(outputPath / "register_functions.cpp"),
+                         "diagnostic output should remain available for investigation");
+            }
+
+            std::error_code removeError;
+            std::filesystem::remove_all(tempRoot, removeError);
+        });
+
         tc.Run("game helpers are not classified as runtime stubs", [](TestCase &t) {
             t.IsFalse(ps2_runtime_calls::isStubName("Pad_init"),
                       "Pad_init should be recompiled as game code");

@@ -42,6 +42,12 @@ int main(int argc, char *argv[])
         recompiler.generateOutput();
         recompiler.printReport();
 
+        if (recompiler.hasErrors())
+        {
+            std::cerr << "Recompilation output contains errors; see report above\n";
+            return 1;
+        }
+
         std::cout << "Recompilation completed successfully\n";
         return 0;
     }

@@ -83,6 +83,11 @@ See the [Ghidra Workflow](ps2xAnalyzer/Readme.md#3-ghidra-integration-for-retail
 
 Then build generated output and link with `ps2xRuntime`.
 
+The recompiler exits with a nonzero status when its report contains errors,
+including unhandled instructions found during C++ generation. Generated files
+are retained for investigation, but their presence alone does not mean that
+translation succeeded. Warnings alone do not cause a nonzero exit status.
+
 ### Configuration
 
 Main fields in `config.toml`:
