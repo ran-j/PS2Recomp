@@ -55,3 +55,6 @@ ctest --test-dir out/build/iop-tests --output-on-failure
 
 The suites cover IRX execution, RPC, imports, version resolution and generic
 HLE compatibility. `ps2x_tests` also covers runtime SIF RPC/DMA integration.
+
+
+The IOMAN compatibility layer currently supports read-only `open`, `close`, `read`, and `lseek` operations through the host VFS adapter. Write and directory operations are not implemented by this layer yet.
