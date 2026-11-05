@@ -10,6 +10,7 @@
 #include "ps2x/iop/iop_host.h"
 
 #include <cstdint>
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <iostream>
@@ -17,6 +18,7 @@
 #include <filesystem>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace
 {
