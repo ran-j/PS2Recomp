@@ -1,10 +1,12 @@
 #pragma once
 
 #include "ps2x/iop/iop_host.h"
+#include "runtime/iso9660_reader.h"
 
 #include <cstdint>
 #include <cstdio>
 #include <mutex>
+#include <memory>
 #include <unordered_map>
 
 class PS2Runtime;
@@ -101,6 +103,8 @@ private:
     {
         std::FILE *stream = nullptr;
         uint64_t size = 0u;
+        std::shared_ptr<ps2x::iso9660::Image> isoImage;
+        ps2x::iso9660::DirectoryEntry isoEntry;
     };
     mutable std::mutex m_hostFileMutex;
     std::unordered_map<uint64_t, HostFile> m_hostFiles;
