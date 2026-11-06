@@ -369,7 +369,7 @@ bool PS2IopHostAdapter::hostFileSize(uint64_t handle, uint64_t &size) const
     size = 0u;
     std::lock_guard<std::mutex> lock(m_hostFileMutex);
     const auto it = m_hostFiles.find(handle);
-    if (it == m_hostFiles.end() || !it->second.stream)
+    if (it == m_hostFiles.end() || (!it->second.stream && !it->second.isoImage))
     {
         return false;
     }
