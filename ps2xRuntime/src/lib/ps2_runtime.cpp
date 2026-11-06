@@ -1158,6 +1158,98 @@ bool PS2Runtime::mountCdIsoImage(const std::filesystem::path &isoPath,
     return true;
 }
 
+bool PS2Runtime::extractMountedCdIsoBootElf(std::string_view bootElfName,
+                                            const std::filesystem::path &destinationPath,
+                                            std::string *error)
+{
+    const auto fail = [error](const std::string &message)
+    {
+        if (error)
+            *error = message;
+        return false;
+    };
+
+    const IoPaths &paths = runtimeIoPaths();
+    if (!paths.cdIsoImage || !paths.cdIsoImage->isOpen())
+        return fail("No CD-ROM ISO image is mounted");
+    if (destinationPath.empty())
+        return fail("Boot ELF destination path is empty");
+
+    const std::filesystem::path normalizedDestination = normalizeAbsolutePath(destinationPath);
+    if (normalizedDestination.empty() || normalizedDestination == paths.cdImage)
+        return fail("Boot ELF destination must be a writable file separate from the ISO image");
+
+    ps2x::iso9660::DirectoryEntry bootEntry;
+    if (!paths.cdIsoImage->findFile(bootElfName, bootEntry) &&
+        !paths.cdIsoImage->findFileRecursive(bootElfName, bootEntry))
+    {
+        return fail("Mounted ISO no longer contains the expected boot ELF");
+    }
+
+    std::vector<uint8_t> elfBytes;
+    if (!paths.cdIsoImage->readFileFully(bootEntry, elfBytes) || elfBytes.size() < 52u)
+        return fail("Unable to extract the complete boot ELF from the mounted ISO");
+
+    if (elfBytes[0] != 0x7Fu || elfBytes[1] != 'E' ||
+        elfBytes[2] != 'L' || elfBytes[3] != 'F' ||
+        elfBytes[4] != 1u || elfBytes[5] != 1u ||
+        elfBytes[18] != 8u || elfBytes[19] != 0u)
+    {
+        return fail("Extracted boot file failed the PS2 ELF header check");
+    }
+
+    std::error_code filesystemError;
+    const std::filesystem::path parent = normalizedDestination.parent_path();
+    if (!parent.empty())
+    {
+        std::filesystem::create_directories(parent, filesystemError);
+        if (filesystemError)
+            return fail("Unable to create the boot ELF output directory: " + filesystemError.message());
+    }
+
+    std::filesystem::path temporaryPath = normalizedDestination;
+    temporaryPath += ".tmp";
+    {
+        std::ofstream output(temporaryPath, std::ios::binary | std::ios::trunc);
+        if (!output)
+            return fail("Unable to create the extracted boot ELF file");
+        output.write(reinterpret_cast<const char *>(elfBytes.data()),
+                     static_cast<std::streamsize>(elfBytes.size()));
+        output.flush();
+        if (!output.good())
+        {
+            output.close();
+            std::filesystem::remove(temporaryPath, filesystemError);
+            return fail("Failed while writing the extracted boot ELF");
+        }
+    }
+
+    std::filesystem::rename(temporaryPath, normalizedDestination, filesystemError);
+    if (filesystemError)
+    {
+        filesystemError.clear();
+        std::filesystem::remove(normalizedDestination, filesystemError);
+        if (filesystemError)
+        {
+            std::filesystem::remove(temporaryPath, filesystemError);
+            return fail("Unable to replace the previous boot ELF file");
+        }
+        std::filesystem::rename(temporaryPath, normalizedDestination, filesystemError);
+    }
+    if (filesystemError)
+    {
+        std::filesystem::remove(temporaryPath, filesystemError);
+        return fail("Unable to finalize the extracted boot ELF file");
+    }
+
+    if (error)
+        error->clear();
+    std::cout << "[ISO9660] Extracted boot ELF " << bootEntry.name
+              << " -> " << normalizedDestination.string()
+              << " (" << elfBytes.size() << " bytes)" << std::endl;
+    return true;
+}
+
 namespace
 {
     bool generatedFunctionTableSlot(uint32_t address, uint32_t &slot)
