@@ -19,6 +19,7 @@
 #include <stdexcept>
 #include <fstream>
 #include <algorithm>
+#include <cctype>
 #include <array>
 #include <cstring>
 #include <limits>
