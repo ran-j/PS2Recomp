@@ -13,6 +13,7 @@
 #include "ps2_host_backend.h"
 #include "ps2_iop_host.h"
 #include "ps2x/iop/iop_subsystem.h"
+#include "runtime/iso9660_reader.h"
 
 #include <iostream>
 #include <stdexcept>
@@ -1066,6 +1067,94 @@ void PS2Runtime::configureIoPathsFromElf(const std::string &elfPath)
     }
 
     setIoPaths(paths);
+}
+
+bool PS2Runtime::mountCdIsoImage(const std::filesystem::path &isoPath,
+                                 std::string_view bootElfName,
+                                 std::string *error)
+{
+    const auto fail = [error](const std::string &message)
+    {
+        if (error)
+            *error = message;
+        return false;
+    };
+
+    if (isoPath.empty() || bootElfName.empty())
+        return fail("ISO path and expected PS2 boot ELF name are required");
+
+    auto image = std::make_shared<ps2x::iso9660::Image>();
+    std::string imageError;
+    const std::filesystem::path normalizedIsoPath = normalizeAbsolutePath(isoPath);
+    if (normalizedIsoPath.empty() || !image->open(normalizedIsoPath, &imageError))
+        return fail(imageError.empty() ? "Unable to open the selected ISO image" : imageError);
+
+    ps2x::iso9660::DirectoryEntry bootEntry;
+    if (!image->findFile(bootElfName, bootEntry) &&
+        !image->findFileRecursive(bootElfName, bootEntry))
+    {
+        return fail("The ISO does not contain the expected boot ELF: " + std::string(bootElfName));
+    }
+    if (bootEntry.isDirectory() || bootEntry.size < 52u)
+        return fail("The selected boot entry is not a valid-sized PS2 ELF file");
+
+    std::array<uint8_t, 52u> elfHeader{};
+    size_t headerBytesRead = 0u;
+    if (!image->readFile(bootEntry, 0u, elfHeader.data(), elfHeader.size(), &headerBytesRead) ||
+        headerBytesRead != elfHeader.size())
+    {
+        return fail("Unable to read the PS2 boot ELF header from the ISO");
+    }
+
+    if (elfHeader[0] != 0x7Fu || elfHeader[1] != 'E' ||
+        elfHeader[2] != 'L' || elfHeader[3] != 'F')
+    {
+        return fail("The selected boot file does not have an ELF signature");
+    }
+    if (elfHeader[4] != 1u || elfHeader[5] != 1u || elfHeader[6] != 1u)
+        return fail("The selected boot ELF is not a 32-bit little-endian ELF file");
+    if (elfHeader[18] != 8u || elfHeader[19] != 0u)
+        return fail("The selected boot ELF is not for the MIPS architecture");
+
+    ps2x::iso9660::DirectoryEntry systemCnfEntry;
+    if (!image->findFile("SYSTEM.CNF", systemCnfEntry) &&
+        !image->findFileRecursive("SYSTEM.CNF", systemCnfEntry))
+    {
+        return fail("SYSTEM.CNF was not found in the selected ISO");
+    }
+
+    std::vector<uint8_t> systemCnfBytes;
+    if (!image->readFileFully(systemCnfEntry, systemCnfBytes))
+        return fail("Unable to read SYSTEM.CNF from the selected ISO");
+
+    std::string systemCnf(systemCnfBytes.begin(), systemCnfBytes.end());
+    std::transform(systemCnf.begin(), systemCnf.end(), systemCnf.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::toupper(ch)); });
+    std::string expectedBootName(bootElfName);
+    const size_t versionSuffix = expectedBootName.find(';');
+    if (versionSuffix != std::string::npos)
+        expectedBootName.erase(versionSuffix);
+    std::transform(expectedBootName.begin(), expectedBootName.end(), expectedBootName.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::toupper(ch)); });
+
+    if (systemCnf.find("BOOT2") == std::string::npos ||
+        systemCnf.find(expectedBootName) == std::string::npos)
+    {
+        return fail("SYSTEM.CNF does not reference the expected boot ELF " + expectedBootName);
+    }
+
+    IoPaths paths = runtimeIoPaths();
+    paths.cdImage = normalizedIsoPath;
+    paths.cdIsoImage = std::move(image);
+    setIoPaths(paths);
+
+    if (error)
+        error->clear();
+    std::cout << "[ISO9660] Mounted " << normalizedIsoPath.string()
+              << " | boot=" << bootEntry.name
+              << " | LBA=" << bootEntry.extentLba
+              << " | size=" << bootEntry.size << std::endl;
+    return true;
 }
 
 namespace
