@@ -71,10 +71,10 @@ namespace ps2x::iso9660
                 result.name.assign(reinterpret_cast<const char *>(record + 33u), identifierLength);
             }
             // Extended-attribute blocks precede the file data extent.
-            const uint32_t dataExtent = readLe32(record + 2u) + record[1u];
+            const uint64_t dataExtent = static_cast<uint64_t>(readLe32(record + 2u)) + record[1u];
             if (dataExtent > std::numeric_limits<uint32_t>::max())
                 return false;
-            result.extentLba = dataExtent;
+            result.extentLba = static_cast<uint32_t>(dataExtent);
             result.size = readLe32(record + 10u);
             result.flags = record[25u];
             return true;
