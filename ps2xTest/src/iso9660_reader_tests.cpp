@@ -105,7 +105,7 @@ namespace
         uint8_t *system = image.data() + 21u * kSectorSize;
         cursor = 0u;
         const std::string systemConfig =
-            "BOOT2 = cdrom0:\\SLES_548.19;1\\nVER = 2.00\\nVMODE = PAL\\n";
+            "BOOT2 = cdrom0:\\SLES_548.19;1\nVER = 2.00\nVMODE = PAL\n";
         cursor += writeDirectoryRecord(system + cursor, 22u, 52u, 0u,
                                        "SLES_548.19;1");
         cursor += writeDirectoryRecord(system + cursor, 23u,
@@ -194,7 +194,7 @@ void register_iso9660_reader_tests()
             std::vector<uint8_t> bytes;
             t.IsTrue(image.readFileFully(boot, bytes), "the boot ELF contents should be readable");
             t.Equals(bytes.size(), static_cast<size_t>(52u), "the complete file size should be read");
-            t.IsTrue(std::memcmp(bytes.data(), "\\x7F" "ELF", 4u) == 0,
+            t.IsTrue(std::memcmp(bytes.data(), "\x7F" "ELF", 4u) == 0,
                      "the boot file should expose a valid ELF magic signature");
         });
 
@@ -242,7 +242,7 @@ void register_iso9660_reader_tests()
             std::array<char, 4u> bytes{};
             t.Equals(vfs.read(descriptor, bytes.data(), bytes.size()), int64_t{4},
                      "VFS should return the requested boot ELF header bytes");
-            t.IsTrue(std::memcmp(bytes.data(), "\\x7F" "ELF", bytes.size()) == 0,
+            t.IsTrue(std::memcmp(bytes.data(), "\x7F" "ELF", bytes.size()) == 0,
                      "VFS should read the ELF signature directly from the ISO extent");
 
             t.Equals(vfs.seek(descriptor, 0, SEEK_SET), int64_t{0},
