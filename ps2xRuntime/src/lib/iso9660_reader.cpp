@@ -48,7 +48,8 @@ namespace ps2x::iso9660
 
         bool parseDirectoryRecord(const uint8_t *record,
                                   size_t recordLength,
-                                  DirectoryEntry &result)
+                                  DirectoryEntry &result,
+                                  bool allowSpecialIdentifier = false)
         {
             if (!record || recordLength < 34u || record[0] < 34u || record[0] > recordLength)
                 return false;
@@ -58,11 +59,22 @@ namespace ps2x::iso9660
                 return false;
 
             // ISO9660 uses one-byte identifiers 0 and 1 for "." and "..".
+            // The PVD root directory record is also encoded with identifier 0.
             if (identifierLength == 1u && (record[33u] == 0u || record[33u] == 1u))
+            {
+                if (!allowSpecialIdentifier)
+                    return false;
+                result.name = record[33u] == 0u ? "." : "..";
+            }
+            else
+            {
+                result.name.assign(reinterpret_cast<const char *>(record + 33u), identifierLength);
+            }
+            // Extended-attribute blocks precede the file data extent.
+            const uint32_t dataExtent = readLe32(record + 2u) + record[1u];
+            if (dataExtent > std::numeric_limits<uint32_t>::max())
                 return false;
-
-            result.name.assign(reinterpret_cast<const char *>(record + 33u), identifierLength);
-            result.extentLba = readLe32(record + 2u);
+            result.extentLba = dataExtent;
             result.size = readLe32(record + 10u);
             result.flags = record[25u];
             return true;
@@ -123,7 +135,8 @@ namespace ps2x::iso9660
             if (rootRecordLength < 34u ||
                 !parseDirectoryRecord(descriptor.data() + 156u,
                                       rootRecordLength,
-                                      root) ||
+                                      root,
+                                      true) ||
                 !root.isDirectory() ||
                 !entryRangeIsValid(root.extentLba, root.size))
             {
