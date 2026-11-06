@@ -161,6 +161,7 @@ namespace ps2x::iso9660
 
     void Image::close() noexcept
     {
+        std::lock_guard<std::mutex> lock(m_streamMutex);
         if (m_stream.is_open())
             m_stream.close();
         m_stream.clear();
@@ -170,6 +171,7 @@ namespace ps2x::iso9660
 
     bool Image::readAt(uint64_t offset, void *destination, size_t size) const
     {
+        std::lock_guard<std::mutex> lock(m_streamMutex);
         if (!m_stream.is_open() || (!destination && size != 0u))
             return false;
         if (offset > m_imageSize || static_cast<uint64_t>(size) > m_imageSize - offset)
