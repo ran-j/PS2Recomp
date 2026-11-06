@@ -1,5 +1,7 @@
 #include "MiniTest.h"
 #include "runtime/iso9660_reader.h"
+#include "runtime/ps2_vfs.h"
+#include "runtime/ps2_rom_device.h"
 
 #include <array>
 #include <chrono>
@@ -7,6 +9,8 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <memory>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -175,6 +179,43 @@ void register_iso9660_reader_tests()
             t.Equals(bytes.size(), static_cast<size_t>(7u), "the complete file size should be read");
             t.IsTrue(std::memcmp(bytes.data(), "ELFTEST", 7u) == 0,
                      "the file payload should match the bytes stored in the ISO");
+        });
+
+        tc.Run("VFS opens and reads files from a mounted CD-ROM ISO", [](TestCase &t)
+        {
+            TemporaryIso fixture;
+            t.IsTrue(fixture.write(makeIsoFixture()), "the synthetic ISO fixture should be written");
+
+            auto image = std::make_shared<ps2x::iso9660::Image>();
+            std::string error;
+            t.IsTrue(image->open(fixture.path, &error), "the image should mount before VFS use");
+
+            PS2Vfs vfs;
+            PS2RomDevice rom;
+            PS2VfsMounts mounts;
+            mounts.cdIsoImage = image;
+
+            const int32_t descriptor = vfs.open("cdrom0:\\SYSTEM\\SLES_548.19;1",
+                                                 1u, // PS2_FIO_O_RDONLY
+                                                 mounts,
+                                                 rom);
+            t.IsTrue(descriptor >= 3, "VFS should open a PS2 CD-ROM file from the mounted ISO");
+
+            std::array<char, 7u> bytes{};
+            t.Equals(vfs.read(descriptor, bytes.data(), bytes.size()), int64_t{7},
+                     "VFS should return the complete boot file payload");
+            t.IsTrue(std::memcmp(bytes.data(), "ELFTEST", bytes.size()) == 0,
+                     "VFS should read the original bytes from the ISO extent");
+
+            t.Equals(vfs.seek(descriptor, 0, SEEK_SET), int64_t{0},
+                     "VFS should seek to the beginning of an ISO-backed file");
+            t.Equals(vfs.close(descriptor), 0, "VFS should close the ISO-backed descriptor");
+
+            PS2VfsStat stat;
+            t.IsTrue(vfs.stat("cdrom0:/SYSTEM/SLES_548.19;1", mounts, rom, stat),
+                     "VFS stat should resolve an ISO-backed file");
+            t.Equals(stat.size, uint64_t{7}, "VFS stat should expose the directory-record file size");
+            t.IsTrue(stat.readOnly, "CD-ROM ISO entries must be read-only");
         });
 
         tc.Run("rejects a file without an ISO9660 descriptor signature", [](TestCase &t)
