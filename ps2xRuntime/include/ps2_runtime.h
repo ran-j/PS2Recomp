@@ -280,6 +280,7 @@ public:
         std::filesystem::path cdRoot;
         std::filesystem::path mcRoot;
         std::filesystem::path cdImage;
+        std::shared_ptr<ps2x::iso9660::Image> cdIsoImage;
     };
 
     PS2Runtime();
