@@ -216,6 +216,18 @@ void register_iso9660_reader_tests()
             t.Equals(PS2Runtime::getIoPaths().cdIsoImage->imageSize(),
                      static_cast<uint64_t>(24u * kSectorSize),
                      "the runtime should retain the mounted image");
+
+            const std::filesystem::path extractedElf = fixture.directory / "SLES_548.19";
+            t.IsTrue(PS2Runtime::extractMountedCdIsoBootElf(
+                         "SLES_548.19;1", extractedElf, &error),
+                     "runtime should extract only the boot ELF to the app-private boot path");
+            t.IsTrue(std::filesystem::exists(extractedElf),
+                     "the extracted boot ELF should be created");
+            std::ifstream extracted(extractedElf, std::ios::binary);
+            std::array<char, 4u> magic{};
+            extracted.read(magic.data(), static_cast<std::streamsize>(magic.size()));
+            t.IsTrue(std::memcmp(magic.data(), "\x7F" "ELF", magic.size()) == 0,
+                     "the extracted file should preserve its PS2 ELF signature");
             PS2Runtime::setIoPaths(previousPaths);
         });
 
