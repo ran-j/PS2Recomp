@@ -2,6 +2,7 @@
 #include "runtime/iso9660_reader.h"
 #include "runtime/ps2_vfs.h"
 #include "runtime/ps2_rom_device.h"
+#include "ps2_runtime.h"
 
 #include <array>
 #include <chrono>
@@ -103,12 +104,28 @@ namespace
 
         uint8_t *system = image.data() + 21u * kSectorSize;
         cursor = 0u;
-        cursor += writeDirectoryRecord(system + cursor, 22u, 7u, 0u,
+        const std::string systemConfig =
+            "BOOT2 = cdrom0:\\SLES_548.19;1\\nVER = 2.00\\nVMODE = PAL\\n";
+        cursor += writeDirectoryRecord(system + cursor, 22u, 52u, 0u,
                                        "SLES_548.19;1");
-        cursor += writeDirectoryRecord(system + cursor, 22u, 7u, 0u,
+        cursor += writeDirectoryRecord(system + cursor, 23u,
+                                       static_cast<uint32_t>(systemConfig.size()), 0u,
                                        "SYSTEM.CNF;1");
 
-        std::memcpy(image.data() + 22u * kSectorSize, "ELFTEST", 7u);
+        std::array<uint8_t, 52u> elfHeader{};
+        elfHeader[0] = 0x7Fu;
+        elfHeader[1] = 'E';
+        elfHeader[2] = 'L';
+        elfHeader[3] = 'F';
+        elfHeader[4] = 1u; // ELFCLASS32
+        elfHeader[5] = 1u; // little-endian
+        elfHeader[6] = 1u; // ELF version
+        elfHeader[16] = 2u; // ET_EXEC
+        elfHeader[18] = 8u; // EM_MIPS
+        elfHeader[20] = 1u;
+        std::memcpy(image.data() + 22u * kSectorSize, elfHeader.data(), elfHeader.size());
+        std::memcpy(image.data() + 23u * kSectorSize,
+                    systemConfig.data(), systemConfig.size());
         return image;
     }
 
@@ -166,7 +183,7 @@ void register_iso9660_reader_tests()
             t.IsTrue(image.findFile("system/sles_548.19", boot),
                      "path lookup should ignore case and the ISO ;version suffix");
             t.Equals(boot.extentLba, 22u, "boot ELF should resolve to the expected sector");
-            t.Equals(boot.size, 7u, "boot ELF should report its directory-record size");
+            t.Equals(boot.size, 52u, "boot ELF should report its directory-record size");
 
             ps2x::iso9660::DirectoryEntry recursive;
             t.IsTrue(image.findFileRecursive("SLES_548.19", recursive),
@@ -176,9 +193,30 @@ void register_iso9660_reader_tests()
 
             std::vector<uint8_t> bytes;
             t.IsTrue(image.readFileFully(boot, bytes), "the boot ELF contents should be readable");
-            t.Equals(bytes.size(), static_cast<size_t>(7u), "the complete file size should be read");
-            t.IsTrue(std::memcmp(bytes.data(), "ELFTEST", 7u) == 0,
-                     "the file payload should match the bytes stored in the ISO");
+            t.Equals(bytes.size(), static_cast<size_t>(52u), "the complete file size should be read");
+            t.IsTrue(std::memcmp(bytes.data(), "\\x7F" "ELF", 4u) == 0,
+                     "the boot file should expose a valid ELF magic signature");
+        });
+
+        tc.Run("runtime validates SYSTEM.CNF and the MIPS boot ELF before mounting",
+               [](TestCase &t)
+        {
+            TemporaryIso fixture;
+            t.IsTrue(fixture.write(makeIsoFixture()), "the synthetic ISO fixture should be written");
+
+            const PS2Runtime::IoPaths previousPaths = PS2Runtime::getIoPaths();
+            std::string error;
+            const bool mounted = PS2Runtime::mountCdIsoImage(
+                fixture.path, "SLES_548.19;1", &error);
+            t.IsTrue(mounted,
+                     "runtime should accept an ISO whose SYSTEM.CNF and ELF match the expected serial");
+            t.Equals(error, std::string(), "successful mount should clear the error message");
+            t.IsTrue(PS2Runtime::getIoPaths().cdIsoImage != nullptr,
+                     "successful validation should publish the ISO mount to the runtime");
+            t.Equals(PS2Runtime::getIoPaths().cdIsoImage->imageSize(),
+                     static_cast<uint64_t>(24u * kSectorSize),
+                     "the runtime should retain the mounted image");
+            PS2Runtime::setIoPaths(previousPaths);
         });
 
         tc.Run("VFS opens and reads files from a mounted CD-ROM ISO", [](TestCase &t)
@@ -201,11 +239,11 @@ void register_iso9660_reader_tests()
                                                  rom);
             t.IsTrue(descriptor >= 3, "VFS should open a PS2 CD-ROM file from the mounted ISO");
 
-            std::array<char, 7u> bytes{};
-            t.Equals(vfs.read(descriptor, bytes.data(), bytes.size()), int64_t{7},
-                     "VFS should return the complete boot file payload");
-            t.IsTrue(std::memcmp(bytes.data(), "ELFTEST", bytes.size()) == 0,
-                     "VFS should read the original bytes from the ISO extent");
+            std::array<char, 4u> bytes{};
+            t.Equals(vfs.read(descriptor, bytes.data(), bytes.size()), int64_t{4},
+                     "VFS should return the requested boot ELF header bytes");
+            t.IsTrue(std::memcmp(bytes.data(), "\\x7F" "ELF", bytes.size()) == 0,
+                     "VFS should read the ELF signature directly from the ISO extent");
 
             t.Equals(vfs.seek(descriptor, 0, SEEK_SET), int64_t{0},
                      "VFS should seek to the beginning of an ISO-backed file");
@@ -214,7 +252,7 @@ void register_iso9660_reader_tests()
             PS2VfsStat stat;
             t.IsTrue(vfs.stat("cdrom0:/SYSTEM/SLES_548.19;1", mounts, rom, stat),
                      "VFS stat should resolve an ISO-backed file");
-            t.Equals(stat.size, uint64_t{7}, "VFS stat should expose the directory-record file size");
+            t.Equals(stat.size, uint64_t{52}, "VFS stat should expose the directory-record file size");
             t.IsTrue(stat.readOnly, "CD-ROM ISO entries must be read-only");
         });
 
