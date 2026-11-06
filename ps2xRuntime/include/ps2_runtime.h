@@ -363,6 +363,9 @@ public:
     static bool mountCdIsoImage(const std::filesystem::path &isoPath,
                                 std::string_view bootElfName,
                                 std::string *error = nullptr);
+    static bool extractMountedCdIsoBootElf(std::string_view bootElfName,
+                                           const std::filesystem::path &destinationPath,
+                                           std::string *error = nullptr);
 
     void SignalException(R5900Context *ctx, PS2Exception exception);
 
