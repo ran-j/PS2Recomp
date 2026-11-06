@@ -359,6 +359,10 @@ public:
     static const IoPaths &getIoPaths();
     static void setIoPaths(const IoPaths &paths);
     static void configureIoPathsFromElf(const std::string &elfPath);
+    // Mount an ISO9660 CD image after validating SYSTEM.CNF and its PS2 ELF boot file.
+    static bool mountCdIsoImage(const std::filesystem::path &isoPath,
+                                std::string_view bootElfName,
+                                std::string *error = nullptr);
 
     void SignalException(R5900Context *ctx, PS2Exception exception);
 
