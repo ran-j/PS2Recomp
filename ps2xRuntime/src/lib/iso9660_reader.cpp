@@ -90,8 +90,9 @@ namespace ps2x::iso9660
     {
         close();
 
-        const auto fail = [error](const char *message)
+        const auto fail = [this, error](const char *message)
         {
+            close();
             if (error)
                 *error = message;
             return false;
@@ -129,6 +130,8 @@ namespace ps2x::iso9660
                 break;
             if (descriptor[0u] != 1u)
                 continue;
+            if (readLe16(descriptor.data() + 128u) != kLogicalBlockSize)
+                return fail("Unsupported ISO9660 logical block size");
 
             DirectoryEntry root;
             const uint8_t rootRecordLength = descriptor[156u];
