@@ -3,6 +3,7 @@
 #include "runtime/ps2_vfs.h"
 #include "runtime/ps2_rom_device.h"
 #include "ps2_runtime.h"
+#include "ps2_iop_host.h"
 
 #include <array>
 #include <chrono>
@@ -266,6 +267,47 @@ void register_iso9660_reader_tests()
                      "VFS stat should resolve an ISO-backed file");
             t.Equals(stat.size, uint64_t{52}, "VFS stat should expose the directory-record file size");
             t.IsTrue(stat.readOnly, "CD-ROM ISO entries must be read-only");
+        });
+
+        tc.Run("IOP host adapter opens ISO-backed cdrom0 paths", [](TestCase &t)
+        {
+            TemporaryIso fixture;
+            t.IsTrue(fixture.write(makeIsoFixture()), "the synthetic ISO fixture should be written");
+
+            auto image = std::make_shared<ps2x::iso9660::Image>();
+            std::string error;
+            t.IsTrue(image->open(fixture.path, &error), "the ISO should open for IOP adapter testing");
+
+            const PS2Runtime::IoPaths previousPaths = PS2Runtime::getIoPaths();
+            PS2Runtime::IoPaths paths = previousPaths;
+            paths.cdImage = fixture.path;
+            paths.cdIsoImage = image;
+            PS2Runtime::setIoPaths(paths);
+
+            PS2Runtime runtime;
+            PS2IopHostAdapter host(runtime);
+            const std::string translated = host.translateGuestPath(
+                "cdrom0:\\SYSTEM\\SLES_548.19;1");
+            t.IsTrue(translated.rfind("ps2x-iso://", 0u) == 0u,
+                     "IOP path translation should return the ISO-backed handle path");
+
+            const uint64_t handle = host.openHostFile(translated);
+            t.IsTrue(handle != 0u, "IOP host should open the translated ISO file");
+            uint64_t fileSize = 0u;
+            t.IsTrue(host.hostFileSize(handle, fileSize),
+                     "IOP host should report the ISO directory-record file size");
+            t.Equals(fileSize, uint64_t{52}, "IOP host should report the boot ELF size");
+
+            std::array<char, 4u> magic{};
+            size_t bytesRead = 0u;
+            t.IsTrue(host.readHostFile(handle, 0u, magic.data(), magic.size(), bytesRead),
+                     "IOP host should read data from the ISO file extent");
+            t.Equals(bytesRead, magic.size(), "IOP host should return the requested byte count");
+            t.IsTrue(std::memcmp(magic.data(), "\x7F" "ELF", magic.size()) == 0,
+                     "IOP host should return the PS2 ELF signature");
+            host.closeHostFile(handle);
+
+            PS2Runtime::setIoPaths(previousPaths);
         });
 
         tc.Run("rejects a file without an ISO9660 descriptor signature", [](TestCase &t)
