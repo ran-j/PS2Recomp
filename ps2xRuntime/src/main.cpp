@@ -175,6 +175,34 @@ int main(int argc, char *argv[])
     {
         std::filesystem::path pathObj = getExecutablePath(argc, argv);
 
+#if defined(__ANDROID__)
+        // The Android setup screen copies the user's selected disc image here.
+        // Keep the existing ELF boot path: only the small boot executable is
+        // extracted; all CD-ROM resources remain mounted from the ISO.
+        const std::filesystem::path selectedIsoPath = pathObj.parent_path() / "Manhunt2.iso";
+        std::error_code isoFileError;
+        if (std::filesystem::exists(selectedIsoPath, isoFileError) && !isoFileError)
+        {
+            std::string isoError;
+            if (!PS2Runtime::mountCdIsoImage(selectedIsoPath, "SLES_548.19;1", &isoError))
+            {
+                std::cerr << "[ISO9660] Disc validation failed: " << isoError << std::endl;
+                return 1;
+            }
+            if (!PS2Runtime::extractMountedCdIsoBootElf("SLES_548.19;1", pathObj, &isoError))
+            {
+                std::cerr << "[ISO9660] Boot ELF extraction failed: " << isoError << std::endl;
+                return 1;
+            }
+        }
+        else if (isoFileError)
+        {
+            std::cerr << "[ISO9660] Unable to inspect selected disc image: "
+                      << isoFileError.message() << std::endl;
+            return 1;
+        }
+#endif
+
         std::string filePathStr = pathObj.string();
         std::string elfName = pathObj.filename().string();
         std::string normalizedId = normalizeGameId(elfName);
