@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -68,6 +69,7 @@ namespace ps2x::iso9660
         [[nodiscard]] bool entryRangeIsValid(uint32_t extentLba, uint32_t size) const noexcept;
 
         mutable std::ifstream m_stream;
+        mutable std::mutex m_streamMutex;
         uint64_t m_imageSize = 0u;
         DirectoryEntry m_rootDirectory;
     };
