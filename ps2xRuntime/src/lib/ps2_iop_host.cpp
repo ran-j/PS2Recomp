@@ -287,7 +287,7 @@ std::string PS2IopHostAdapter::hostPath(ps2x::iop::HostPathKind kind) const
 }
 
 bool PS2IopHostAdapter::findCdFile(std::string_view path,
-                                           ps2x::iop::CdFileInfo &result) const
+                                           ps2x::iop::IopHost::CdFileInfo &result) const
 {
     result = {};
     const PS2Runtime::IoPaths &paths = PS2Runtime::getIoPaths();
