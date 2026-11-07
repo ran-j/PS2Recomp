@@ -473,6 +473,47 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
         }
     }
 
+    PS2_IF_AGRESSIVE_LOGS({
+        static uint32_t s_frameStatsLogCount = 0u;
+        if (s_frameStatsLogCount < 8u || (s_frameStatsLogCount % 30u) == 0u)
+        {
+            uint64_t nonBlackPixels = 0u;
+            uint64_t rgbSum = 0u;
+            uint64_t hash = 14695981039346656037ull;
+            for (size_t i = 0u; i + 3u < s_uploadBuffer.size(); i += 4u)
+            {
+                const uint8_t r = s_uploadBuffer[i + 0u];
+                const uint8_t g = s_uploadBuffer[i + 1u];
+                const uint8_t b = s_uploadBuffer[i + 2u];
+                if (r != 0u || g != 0u || b != 0u)
+                    ++nonBlackPixels;
+                rgbSum += static_cast<uint64_t>(r) + static_cast<uint64_t>(g) + static_cast<uint64_t>(b);
+                for (size_t channel = 0u; channel < 4u; ++channel)
+                {
+                    hash ^= s_uploadBuffer[i + channel];
+                    hash *= 1099511628211ull;
+                }
+            }
+            const auto gsSnapshot = rt->gs().getDebugSnapshot();
+            std::cout << "[frame:stats] idx=" << s_frameStatsLogCount
+                      << " tick=" << currentTick
+                      << " nonBlackPixels=" << nonBlackPixels
+                      << " rgbSum=" << rgbSum
+                      << " fnv1a64=0x" << std::hex << hash
+                      << " pmode=0x" << gsSnapshot.pmode
+                      << " smode2=0x" << gsSnapshot.smode2
+                      << " dispfb1=0x" << gsSnapshot.dispfb1
+                      << " display1=0x" << gsSnapshot.display1
+                      << " dispfb2=0x" << gsSnapshot.dispfb2
+                      << " display2=0x" << gsSnapshot.display2
+                      << std::dec
+                      << " imageUploads=" << rt->gs().nativeImageUploadCount()
+                      << " gifPackets=" << rt->gs().nativePackedGIFPacketCount()
+                      << std::endl;
+        }
+        ++s_frameStatsLogCount;
+    });
+
     UpdateTexture(tex, s_uploadBuffer.data());
     outWidth = width;
     outHeight = height;
