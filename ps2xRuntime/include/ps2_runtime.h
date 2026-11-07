@@ -280,6 +280,7 @@ public:
         std::filesystem::path cdRoot;
         std::filesystem::path mcRoot;
         std::filesystem::path cdImage;
+        std::shared_ptr<ps2x::iso9660::Image> cdIsoImage;
     };
 
     PS2Runtime();
@@ -358,6 +359,13 @@ public:
     static const IoPaths &getIoPaths();
     static void setIoPaths(const IoPaths &paths);
     static void configureIoPathsFromElf(const std::string &elfPath);
+    // Mount an ISO9660 CD image after validating SYSTEM.CNF and its PS2 ELF boot file.
+    static bool mountCdIsoImage(const std::filesystem::path &isoPath,
+                                std::string_view bootElfName,
+                                std::string *error = nullptr);
+    static bool extractMountedCdIsoBootElf(std::string_view bootElfName,
+                                           const std::filesystem::path &destinationPath,
+                                           std::string *error = nullptr);
 
     void SignalException(R5900Context *ctx, PS2Exception exception);
 

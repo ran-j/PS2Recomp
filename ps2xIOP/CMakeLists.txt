@@ -25,6 +25,7 @@ add_library(ps2_iop STATIC
     src/emulator/imports/iop_sysmem.cpp
     src/emulator/imports/iop_timrman.cpp
     src/emulator/imports/iop_vblank.cpp
+    src/modules/cdvdman.cpp
     src/modules/dbcman.cpp
     src/modules/libsd.cpp
     src/modules/mcserv.cpp
@@ -61,7 +62,6 @@ if(PS2X_IOP_BUILD_TESTS)
     target_link_libraries(ps2_iop_import_version_tests PRIVATE ps2_iop)
     target_include_directories(ps2_iop_import_version_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     add_test(NAME ps2_iop_import_version_tests COMMAND ps2_iop_import_version_tests)
-
 endif()
 
 install(TARGETS ps2_iop

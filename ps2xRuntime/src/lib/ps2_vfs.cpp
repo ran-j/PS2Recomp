@@ -2,6 +2,7 @@
 
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_rom_device.h"
+#include "runtime/iso9660_reader.h"
 
 #include <algorithm>
 #include <chrono>
@@ -105,6 +106,59 @@ namespace
         size_t m_position = 0u;
     };
 
+    class IsoOpenFile final : public IPS2OpenFile
+    {
+    public:
+        IsoOpenFile(std::shared_ptr<ps2x::iso9660::Image> image,
+                    ps2x::iso9660::DirectoryEntry entry)
+            : m_image(std::move(image)), m_entry(std::move(entry))
+        {
+        }
+
+        int64_t read(void *destination, size_t size) override
+        {
+            if (!m_image || (!destination && size != 0u))
+                return -1;
+            size_t bytesRead = 0u;
+            if (!m_image->readFile(m_entry, m_position, destination, size, &bytesRead))
+                return -1;
+            m_position += bytesRead;
+            return static_cast<int64_t>(bytesRead);
+        }
+
+        int64_t write(const void *, size_t) override
+        {
+            return -1;
+        }
+
+        int64_t seek(int64_t offset, int whence) override
+        {
+            int64_t base = 0;
+            if (whence == SEEK_CUR)
+                base = static_cast<int64_t>(m_position);
+            else if (whence == SEEK_END)
+                base = static_cast<int64_t>(m_entry.size);
+            else if (whence != SEEK_SET)
+                return -1;
+
+            if ((offset > 0 && base > std::numeric_limits<int64_t>::max() - offset) ||
+                (offset < 0 && base < std::numeric_limits<int64_t>::min() - offset))
+            {
+                return -1;
+            }
+            const int64_t position = base + offset;
+            if (position < 0 || static_cast<uint64_t>(position) > m_entry.size)
+                return -1;
+            m_position = static_cast<uint64_t>(position);
+            return position;
+        }
+
+    private:
+        std::shared_ptr<ps2x::iso9660::Image> m_image;
+        ps2x::iso9660::DirectoryEntry m_entry;
+        uint64_t m_position = 0u;
+    };
+
     const char *hostMode(uint32_t flags)
     {
         const bool read = (flags & PS2_FIO_O_RDONLY) != 0u || (flags & PS2_FIO_O_RDWR) == PS2_FIO_O_RDWR;
@@ -170,6 +224,17 @@ int32_t PS2Vfs::open(std::string_view path, uint32_t flags, const PS2VfsMounts &
         if (!rom.readFile(parsed.path, bytes))
             return -1;
         file = std::make_unique<MemoryOpenFile>(std::move(bytes));
+    }
+    else if (parsed.device == ps2x::iop::Ps2PathDevice::Cdrom && mounts.cdIsoImage)
+    {
+        const uint32_t access = flags & PS2_FIO_O_RDWR;
+        if (access != PS2_FIO_O_RDONLY || (flags & (PS2_FIO_O_CREAT | PS2_FIO_O_TRUNC | PS2_FIO_O_APPEND)) != 0u)
+            return -1;
+
+        ps2x::iso9660::DirectoryEntry entry;
+        if (!mounts.cdIsoImage->findFile(parsed.path, entry) || entry.isDirectory())
+            return -1;
+        file = std::make_unique<IsoOpenFile>(mounts.cdIsoImage, std::move(entry));
     }
     else
     {
@@ -242,6 +307,17 @@ bool PS2Vfs::stat(std::string_view path, const PS2VfsMounts &mounts, const PS2Ro
     {
         if (!rom.fileSize(parsed.path, result.size))
             return false;
+        result.readOnly = true;
+        return true;
+    }
+
+    if (parsed.device == ps2x::iop::Ps2PathDevice::Cdrom && mounts.cdIsoImage)
+    {
+        ps2x::iso9660::DirectoryEntry entry;
+        if (!mounts.cdIsoImage->findFile(parsed.path, entry))
+            return false;
+        result.directory = entry.isDirectory();
+        result.size = entry.size;
         result.readOnly = true;
         return true;
     }

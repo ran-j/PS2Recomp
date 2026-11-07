@@ -600,11 +600,32 @@ namespace ps2x::iop::detail
                 return false;
 
             const std::string guestPath = memory.readString(nameAddress, 1024u);
+
+            // When a real ISO is mounted, return the file's actual LSN and size
+            // from its ISO9660 directory record. The old virtual-directory index
+            // describes a host folder and its synthetic LSNs do not match sectors
+            // in the mounted disc image.
+            ps2x::iop::IopHost::CdFileInfo discEntry;
+            const bool hasMountedDisc = !host.hostPath(HostPathKind::CdImage).empty();
+            if (hasMountedDisc)
+            {
+                if (!host.findCdFile(guestPath, discEntry))
+                    return false;
+
+                std::array<uint8_t, 32u> result{};
+                writeLe32(result.data(), discEntry.lsn);
+                writeLe32(result.data() + 4u, discEntry.size);
+                const std::string leaf = normalizedIsoComponent(discEntry.name);
+                std::memcpy(result.data() + 8u, leaf.data(), std::min<size_t>(16u, leaf.size()));
+                result[24u] = discEntry.directory ? 2u : 0u;
+                return memory.writeRam(resultAddress, result.data(), result.size());
+            }
+
+            // Keep the synthetic host-directory disc for non-ISO runner setups.
             IsoNode *node = findVirtualIsoNode(guestPath);
             if (!node)
                 return false;
 
-            // sceCdlFILE: lsn, size, name[16], date/flags[8].
             std::array<uint8_t, 32u> result{};
             writeLe32(result.data(), node->lsn);
             writeLe32(result.data() + 4u, node->size);
