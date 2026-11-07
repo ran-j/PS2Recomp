@@ -820,6 +820,16 @@ namespace ps2_stubs
                 gsRegs.pmode = pmode;
                 gsRegs.smode2 = smode2;
 
+                // Seed the complete display state in the privileged-register
+                // block as well as through the GIF A+D packet below. The HLE
+                // path must not depend on a later GIF drain to establish a
+                // valid host presentation request on Android.
+                gsRegs.dispfb1 = dispfb;
+                gsRegs.display1 = display;
+                gsRegs.dispfb2 = dispfb;
+                gsRegs.display2 = display;
+                gsRegs.bgcolor = bgcolor;
+
                 // The remaining display registers use the runtime's existing
                 // privileged-register aliases (0x59..0x5F) through GIF A+D.
                 uint32_t pktAddr = runtime->guestMalloc(128u, 16u);
