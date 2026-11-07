@@ -1350,6 +1350,16 @@ void EeScheduler::completeVSync(uint64_t tick)
         const int result = wait.fixedResult >= 0
                                ? wait.fixedResult
                                : static_cast<int>((tick - 1u) & 1u);
+        static std::atomic<uint32_t> s_vsyncWakeLogCount{0u};
+        const uint32_t logIndex = s_vsyncWakeLogCount.fetch_add(1u, std::memory_order_relaxed);
+        if (logIndex < 128u)
+        {
+            RUNTIME_LOG("EE_VSYNC_WAKE index=" << logIndex
+                                               << " thread=" << id
+                                               << " tick=" << tick
+                                               << " result=" << result
+                                               << std::endl);
+        }
         makeReady(*waiter, result, false);
     }
     publishSnapshot();
@@ -1868,6 +1878,15 @@ void EeScheduler::processEvent(const EeEvent &event)
         break;
     case EeEventType::VBlankStart:
         ++m_vsyncTick;
+        static std::atomic<uint32_t> s_vblankLogCount{0u};
+        const uint32_t vblankLogIndex = s_vblankLogCount.fetch_add(1u, std::memory_order_relaxed);
+        if (vblankLogIndex < 128u)
+        {
+            RUNTIME_LOG("EE_VBLANK_START index=" << vblankLogIndex
+                                                 << " tick=" << m_vsyncTick
+                                                 << " ee_cycle=" << m_eeCycle
+                                                 << std::endl);
+        }
         m_runtime.memory().gs().vsyncTick.store(m_vsyncTick, std::memory_order_release);
         if ((m_vsyncTick & 1u) != 0u)
         {
