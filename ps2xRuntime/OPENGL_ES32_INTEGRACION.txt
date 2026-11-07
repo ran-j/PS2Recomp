@@ -1,0 +1,27 @@
+PAQUETE DE PREPARACIÓN OPENGL ES 3.2 — PS2Recomp
+
+RUTAS DESTINO (copiar desde la raíz del repositorio):
+1) ps2xRuntime/include/runtime/gs/gs_opengl_backend.h
+2) ps2xRuntime/src/lib/gs/gs_opengl_backend.cpp
+
+ESTADO REAL DE ESTE PAQUETE
+- Declara la interfaz completa exigida por GSRasterBackend.
+- En Android consulta GL_VERSION y comprueba si el contexto actual es OpenGL ES 3.2.
+- Conserva todas las operaciones GS delegándolas a GSCpuBackend.
+- NO realiza todavía rasterización GS en la GPU. No es el backend GPU final y no se debe seleccionar como renderer esperando acelerar el juego.
+- No cambia la carga de ISO, ELF, permisos ni el arranque.
+
+ANTES DE COMPILAR
+A) Añadir gs_opengl_backend.cpp a la lista de fuentes de ps2_runtime en:
+   ps2xRuntime/CMakeLists.txt
+B) Confirmar que el target Android enlaza EGL y GLESv3.
+C) No activar GSOpenGLBackend en GS::setRasterBackend todavía.
+D) Primero hay que localizar el punto exacto donde Raylib crea el contexto EGL y verificar
+   que el backend se construya en el hilo con ese contexto activo.
+
+IMPORTANTE
+Este paquete es una primera etapa segura de integración y diagnóstico de contexto.
+No se ha compilado contra tu rama ni probado en un dispositivo. No reemplaza todavía
+el renderizador CPU por un renderizador GS OpenGL real.
+El siguiente cambio, separado y revisado por diff, será implementar rasterización GPU
+para primitivas GS y sincronización VRAM/presentación.
