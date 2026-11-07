@@ -96,7 +96,23 @@ namespace ps2x::iop
 
         virtual void audioCommand(uint32_t sid, uint32_t function, GuestBuffer send, GuestBuffer receive) = 0;
 
+        struct CdFileInfo
+        {
+            uint32_t lsn = 0u;
+            uint32_t size = 0u;
+            bool directory = false;
+            std::string name;
+        };
+
         virtual std::string hostPath(HostPathKind kind) const = 0;
+        // Resolve a CD-ROM path against the mounted disc image and return its real
+        // ISO9660 extent. Hosts without a mounted image may keep the default.
+        virtual bool findCdFile(std::string_view path, CdFileInfo &result) const
+        {
+            (void)path;
+            (void)result;
+            return false;
+        }
         virtual std::string translateGuestPath(std::string_view path) const = 0;
         virtual uint64_t openHostFile(std::string_view path) = 0;
         virtual bool hostFileSize(uint64_t handle, uint64_t &size) const = 0;

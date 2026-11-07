@@ -21,6 +21,7 @@ target_include_directories(ps2_test_function_table PRIVATE
 )
 
 add_library(ps2_test_lib STATIC
+    src/iso9660_reader_tests.cpp
     src/code_generator_tests.cpp
     src/r5900_decoder_tests.cpp
     src/elf_analyzer_tests.cpp

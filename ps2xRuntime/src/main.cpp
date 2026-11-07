@@ -14,6 +14,7 @@
 #include <exception>
 #include <algorithm>
 #include <cstdlib>
+#include <fstream>
 
 #if defined(__ANDROID__)
 #include <android/log.h>
@@ -25,6 +26,40 @@
 
 namespace
 {
+    std::filesystem::path g_androidDiagnosticPath;
+
+    void beginAndroidDiagnostic(const std::filesystem::path &bootElfPath)
+    {
+#if defined(__ANDROID__)
+        g_androidDiagnosticPath = bootElfPath.parent_path() / "manhunt2_runtime.log";
+        std::ofstream output(g_androidDiagnosticPath, std::ios::out | std::ios::trunc);
+        if (output)
+        {
+            output << "Manhunt 2 Android startup diagnostic\n";
+            output << "BOOT_ELF=" << bootElfPath.string() << '\n';
+            output.flush();
+        }
+#else
+        (void)bootElfPath;
+#endif
+    }
+
+    void writeAndroidDiagnostic(const std::string &message)
+    {
+#if defined(__ANDROID__)
+        if (g_androidDiagnosticPath.empty())
+            return;
+        std::ofstream output(g_androidDiagnosticPath, std::ios::out | std::ios::app);
+        if (output)
+        {
+            output << message << '\n';
+            output.flush();
+        }
+#else
+        (void)message;
+#endif
+    }
+
 #if defined(__ANDROID__)
     int g_logcatPipeFds[2]{-1, -1};
     std::thread g_logcatThread;
@@ -97,6 +132,7 @@ namespace
         std::set_terminate([]()
                            {
                                std::cerr << "[terminate] unhandled exception" << std::endl;
+                               writeAndroidDiagnostic("FATAL_TERMINATE");
                                const std::exception_ptr ep = std::current_exception();
                                if (ep)
                                {
@@ -174,6 +210,43 @@ int main(int argc, char *argv[])
     try
     {
         std::filesystem::path pathObj = getExecutablePath(argc, argv);
+        beginAndroidDiagnostic(pathObj);
+        writeAndroidDiagnostic("BOOT_PATH_RESOLVED");
+
+#if defined(__ANDROID__)
+        // The Android setup screen copies the user's selected disc image here.
+        // Keep the existing ELF boot path: only the small boot executable is
+        // extracted; all CD-ROM resources remain mounted from the ISO.
+        const std::filesystem::path selectedIsoPath = pathObj.parent_path() / "Manhunt2.iso";
+        writeAndroidDiagnostic("ISO_CHECK path=" + selectedIsoPath.string());
+        std::error_code isoFileError;
+        if (std::filesystem::exists(selectedIsoPath, isoFileError) && !isoFileError)
+        {
+            const auto isoSize = std::filesystem::file_size(selectedIsoPath, isoFileError);
+            writeAndroidDiagnostic("ISO_FOUND size=" + std::to_string(isoFileError ? 0 : isoSize));
+            std::string isoError;
+            if (!PS2Runtime::mountCdIsoImage(selectedIsoPath, "SLES_548.19;1", &isoError))
+            {
+                std::cerr << "[ISO9660] Disc validation failed: " << isoError << std::endl;
+                writeAndroidDiagnostic("ISO_VALIDATION_FAILED: " + isoError);
+                return 1;
+            }
+            if (!PS2Runtime::extractMountedCdIsoBootElf("SLES_548.19;1", pathObj, &isoError))
+            {
+                std::cerr << "[ISO9660] Boot ELF extraction failed: " << isoError << std::endl;
+                writeAndroidDiagnostic("ELF_EXTRACTION_FAILED: " + isoError);
+                return 1;
+            }
+            writeAndroidDiagnostic("ISO_MOUNT_AND_ELF_EXTRACTION_OK");
+        }
+        else if (isoFileError)
+        {
+            std::cerr << "[ISO9660] Unable to inspect selected disc image: "
+                      << isoFileError.message() << std::endl;
+            writeAndroidDiagnostic("ISO_STAT_FAILED: " + isoFileError.message());
+            return 1;
+        }
+#endif
 
         std::string filePathStr = pathObj.string();
         std::string elfName = pathObj.filename().string();
@@ -217,16 +290,21 @@ int main(int argc, char *argv[])
         if (!runtime.initialize(windowTitle.c_str()))
         {
             std::cerr << "Failed to initialize PS2 runtime" << std::endl;
+            writeAndroidDiagnostic("RUNTIME_INITIALIZE_FAILED");
             return 1;
         }
+        writeAndroidDiagnostic("RUNTIME_INITIALIZE_OK");
 
         if (!runtime.loadELF(filePathStr))
         {
             std::cerr << "Failed to load ELF file: " << filePathStr << std::endl;
+            writeAndroidDiagnostic("ELF_LOAD_FAILED: " + filePathStr);
             return 1;
         }
+        writeAndroidDiagnostic("ELF_LOAD_OK; ENTERING_GAME_RUNTIME");
 
         runtime.run();
+        writeAndroidDiagnostic("GAME_RUNTIME_RETURNED");
 
 #ifdef _DEBUG
         ps2_log::print_saved_location();
@@ -238,10 +316,12 @@ int main(int argc, char *argv[])
     catch (const std::exception &e)
     {
         std::cerr << "[main] fatal exception: " << e.what() << std::endl;
+        writeAndroidDiagnostic(std::string("MAIN_EXCEPTION: ") + e.what());
     }
     catch (...)
     {
         std::cerr << "[main] fatal exception: unknown" << std::endl;
+        writeAndroidDiagnostic("MAIN_EXCEPTION: unknown");
     }
 
     std::cout.flush();

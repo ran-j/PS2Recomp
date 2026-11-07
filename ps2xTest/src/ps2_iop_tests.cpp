@@ -54,6 +54,31 @@ void register_ps2_iop_tests()
                       "stopping LIBSD should deactivate its RPC endpoint");
         });
 
+        tc.Run("CDVD ROM RPC endpoints are available before loading a disc module", [](TestCase &t)
+        {
+            iop_test::Host host;
+            ps2x::iop::IopSubsystem subsystem(host);
+
+            constexpr uint32_t kCcmdSid = 0x80000592u;
+            constexpr uint32_t kScmdSid = 0x80000593u;
+            constexpr uint32_t kStcmdSid = 0x80000595u;
+            constexpr uint32_t kSearchSid = 0x8000059Au;
+            t.IsTrue(subsystem.canBindRpc(kCcmdSid), "CCMD must be bindable from the ROM service");
+            t.IsTrue(subsystem.canBindRpc(kScmdSid), "SCMD must be bindable from the ROM service");
+            t.IsTrue(subsystem.canBindRpc(kStcmdSid), "STCMD must be bindable from the ROM service");
+            t.IsTrue(subsystem.canBindRpc(kSearchSid), "CDVD file search must be bindable from the ROM service");
+
+            host.fill(0x800u, 12u);
+            ps2x::iop::RpcRequest request{};
+            request.sid = kScmdSid;
+            request.function = 0x27u;
+            request.receive = {0x800u, 12u};
+            const ps2x::iop::RpcResult result = subsystem.handleRpc(request);
+            t.IsTrue(result.handled, "the CDVD ROM service must answer the observed initialization handshake");
+            t.Equals(result.resultAddress, request.receive.address, "the RPC result must reference its receive buffer");
+            t.Equals(host.word(0x800u), 1u, "SCMD 0x27 must return a nonzero initialization status");
+        });
+
         tc.Run("unknown SID remains unhandled without a loaded IRX", [](TestCase &t)
         {
             iop_test::Host host;

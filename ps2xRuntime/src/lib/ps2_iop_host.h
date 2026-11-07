@@ -1,10 +1,12 @@
 #pragma once
 
 #include "ps2x/iop/iop_host.h"
+#include "runtime/iso9660_reader.h"
 
 #include <cstdint>
 #include <cstdio>
 #include <mutex>
+#include <memory>
 #include <unordered_map>
 
 class PS2Runtime;
@@ -62,6 +64,7 @@ public:
                       ps2x::iop::GuestBuffer receive) override;
 
     std::string hostPath(ps2x::iop::HostPathKind kind) const override;
+    bool findCdFile(std::string_view path, ps2x::iop::IopHost::CdFileInfo &result) const override;
     std::string translateGuestPath(std::string_view path) const override;
     uint64_t openHostFile(std::string_view path) override;
     bool hostFileSize(uint64_t handle, uint64_t &size) const override;
@@ -101,6 +104,8 @@ private:
     {
         std::FILE *stream = nullptr;
         uint64_t size = 0u;
+        std::shared_ptr<ps2x::iso9660::Image> isoImage;
+        ps2x::iso9660::DirectoryEntry isoEntry;
     };
     mutable std::mutex m_hostFileMutex;
     std::unordered_map<uint64_t, HostFile> m_hostFiles;

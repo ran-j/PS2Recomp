@@ -4,11 +4,13 @@
 #include "emulator/imports/iop_cdvd.h"
 #include "emulator/imports/iop_imports.h"
 #include "emulator/imports/iop_loadcore.h"
+#include "emulator/imports/iop_ioman.h"
 #include "emulator/imports/iop_timrman.h"
 #include "emulator/services/iop_rpc.h"
 #include "ps2x/iop/iop_host.h"
 
 #include <cstdint>
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <iostream>
@@ -16,6 +18,7 @@
 #include <filesystem>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace
 {
@@ -47,6 +50,62 @@ namespace
         bool hasGuestFunction(uint32_t) const override { return false; }
         bool invokeGuestFunction(uint64_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t *) override { return false; }
         void log(LogLevel, std::string_view) override {}
+    };
+
+    class MemoryFileHost final : public NullHost
+    {
+    public:
+        MemoryFileHost()
+            : bytes{'A', 'B', 'C', 'D', 'E', 'F'}
+        {
+        }
+
+        std::string translateGuestPath(std::string_view path) const override
+        {
+            return path == "cdrom0:\\AUDIO\\BANK.BIN;1" ? "virtual:/AUDIO/BANK.BIN" : std::string{};
+        }
+
+        uint64_t openHostFile(std::string_view path) override
+        {
+            if (path != "virtual:/AUDIO/BANK.BIN")
+                return 0u;
+            ++openCount;
+            return 1u;
+        }
+
+        bool hostFileSize(uint64_t handle, uint64_t &size) const override
+        {
+            if (handle != 1u)
+                return false;
+            size = bytes.size();
+            return true;
+        }
+
+        bool readHostFile(uint64_t handle,
+                          uint64_t offset,
+                          void *destination,
+                          size_t size,
+                          size_t &bytesRead) override
+        {
+            bytesRead = 0u;
+            if (handle != 1u || (!destination && size != 0u))
+                return false;
+            if (offset >= bytes.size() || size == 0u)
+                return true;
+            bytesRead = std::min<size_t>(size, bytes.size() - static_cast<size_t>(offset));
+            std::memcpy(destination, bytes.data() + offset, bytesRead);
+            return true;
+        }
+
+        void closeHostFile(uint64_t handle) override
+        {
+            if (handle == 1u)
+                ++closeCount;
+        }
+
+        std::vector<uint8_t> bytes;
+        uint32_t openCount = 0u;
+        uint32_t closeCount = 0u;
     };
 
     class CdRootHost final : public NullHost
@@ -96,6 +155,88 @@ namespace
             return true;
         std::cerr << "FAIL: " << message << '\n';
         return false;
+    }
+
+    bool testIomanReadOnlyFileOperations()
+    {
+        MemoryFileHost host;
+        IopMemory memory;
+        IopIoman ioman(host, memory);
+        RecordingExecutor executor;
+
+        constexpr uint32_t pathAddress = 0x2000u;
+        constexpr uint32_t firstBuffer = 0x2100u;
+        constexpr uint32_t secondBuffer = 0x2120u;
+        const char guestPath[] = "cdrom0:\\AUDIO\\BANK.BIN;1";
+        if (!expect(memory.writeRam(pathAddress, guestPath, sizeof(guestPath)),
+                    "could not place the IOP test path in memory"))
+            return false;
+
+        IopCpuState cpu{};
+        cpu.gpr[4] = pathAddress;
+        cpu.gpr[5] = 0x0001u; // FIO_O_RDONLY
+        if (!expect(ioman.dispatchImport(4u, cpu, executor), "ioman:4 (open) was not handled") ||
+            !expect(cpu.gpr[2] == 3u, "ioman:4 did not return the first available file descriptor") ||
+            !expect(host.openCount == 1u, "ioman:4 did not open the translated VFS path"))
+            return false;
+        const uint32_t fd = cpu.gpr[2];
+
+        cpu = {};
+        cpu.gpr[4] = fd;
+        cpu.gpr[5] = firstBuffer;
+        cpu.gpr[6] = 4u;
+        if (!expect(ioman.dispatchImport(6u, cpu, executor), "ioman:6 (read) was not handled") ||
+            !expect(cpu.gpr[2] == 4u, "ioman:6 returned the wrong byte count"))
+            return false;
+        char firstRead[4]{};
+        if (!expect(memory.readRam(firstBuffer, firstRead, sizeof(firstRead)),
+                    "ioman:6 did not write into IOP RAM") ||
+            !expect(std::string(firstRead, sizeof(firstRead)) == "ABCD",
+                    "ioman:6 read the wrong bytes"))
+            return false;
+
+        cpu = {};
+        cpu.gpr[4] = fd;
+        cpu.gpr[5] = 2u;
+        cpu.gpr[6] = 0u; // FIO_SEEK_SET
+        if (!expect(ioman.dispatchImport(8u, cpu, executor), "ioman:8 (lseek) was not handled") ||
+            !expect(cpu.gpr[2] == 2u, "ioman:8 did not seek to the requested offset"))
+            return false;
+
+        cpu = {};
+        cpu.gpr[4] = fd;
+        cpu.gpr[5] = secondBuffer;
+        cpu.gpr[6] = 3u;
+        if (!expect(ioman.dispatchImport(6u, cpu, executor), "second ioman:6 (read) was not handled") ||
+            !expect(cpu.gpr[2] == 3u, "second ioman:6 returned the wrong byte count"))
+            return false;
+        char secondRead[3]{};
+        if (!expect(memory.readRam(secondBuffer, secondRead, sizeof(secondRead)),
+                    "second ioman:6 did not write into IOP RAM") ||
+            !expect(std::string(secondRead, sizeof(secondRead)) == "CDE",
+                    "ioman:8/ioman:6 did not preserve the file position"))
+            return false;
+
+        cpu = {};
+        cpu.gpr[4] = fd;
+        if (!expect(ioman.dispatchImport(5u, cpu, executor), "ioman:5 (close) was not handled") ||
+            !expect(cpu.gpr[2] == 0u, "ioman:5 did not return success") ||
+            !expect(host.closeCount == 1u, "ioman:5 did not close the host file"))
+            return false;
+
+        cpu = {};
+        cpu.gpr[4] = fd;
+        cpu.gpr[5] = firstBuffer;
+        cpu.gpr[6] = 1u;
+        if (!expect(ioman.dispatchImport(6u, cpu, executor), "ioman:6 did not handle an invalid descriptor") ||
+            !expect(cpu.gpr[2] == 0xFFFFFFFFu, "ioman:6 did not reject an invalid descriptor"))
+            return false;
+
+        cpu = {};
+        cpu.gpr[4] = pathAddress;
+        cpu.gpr[5] = 0x0002u; // FIO_O_WRONLY is not supported by the read-only host adapter.
+        return expect(ioman.dispatchImport(4u, cpu, executor), "ioman:4 did not handle a write-only open request") &&
+               expect(cpu.gpr[2] == 0xFFFFFFFFu, "ioman:4 accepted a write-only open request");
     }
 
     bool testLoadcoreRebootLibraryMode()
@@ -330,8 +471,8 @@ namespace
 
 int main()
 {
-    if (!testLoadcoreRebootLibraryMode() || !testCdvdSpecialControl() || !testCdvdSearchFile() ||
-        !testTimrmanPeriodicCallback())
+    if (!testIomanReadOnlyFileOperations() || !testLoadcoreRebootLibraryMode() ||
+        !testCdvdSpecialControl() || !testCdvdSearchFile() || !testTimrmanPeriodicCallback())
         return 1;
     std::cout << "ps2xIOP import tests passed\n";
     return 0;

@@ -13,6 +13,8 @@
 #include <unordered_map>
 #include <vector>
 
+namespace ps2x::iso9660 { class Image; }
+
 class PS2RomDevice;
 
 struct PS2VfsMounts
@@ -20,6 +22,7 @@ struct PS2VfsMounts
     std::filesystem::path hostRoot;
     std::filesystem::path cdRoot;
     std::filesystem::path memoryCard0Root;
+    std::shared_ptr<ps2x::iso9660::Image> cdIsoImage;
 };
 
 struct PS2VfsStat
