@@ -1877,6 +1877,7 @@ void EeScheduler::processEvent(const EeEvent &event)
         requestStop();
         break;
     case EeEventType::VBlankStart:
+    {
         ++m_vsyncTick;
         static std::atomic<uint32_t> s_vblankLogCount{0u};
         const uint32_t vblankLogIndex = s_vblankLogCount.fetch_add(1u, std::memory_order_relaxed);
@@ -1921,6 +1922,7 @@ void EeScheduler::processEvent(const EeEvent &event)
         }
         dispatchIrq(false, 2u);
         break;
+    }
     case EeEventType::ExternalWake:
         completeExternalWait(event.id, event.value, KE_OK);
         break;
