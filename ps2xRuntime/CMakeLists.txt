@@ -376,6 +376,8 @@ function(ps2x_stage_ffmpeg_runtime_dlls target_name)
 endfunction()
 
 add_library(ps2_runtime STATIC
+    src/lib/gs/gs_backend.cpp
+    src/lib/gs/gs_opengl_backend.cpp
     src/lib/game_overrides.cpp
     src/lib/gs/ps2_gif_arbiter.cpp
     src/lib/ps2_audio.cpp
@@ -506,11 +508,26 @@ target_include_directories(ps2_runtime PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src/lib/Kernel
 )
 
-target_link_libraries(ps2_runtime PUBLIC ps2_host_backend ffmpeg ps2_iop)
-target_link_libraries(ps2EntryRunner
-    PRIVATE
-    ps2_runtime
+target_link_libraries(ps2_runtime PUBLIC
+    ps2_host_backend
+    ffmpeg
+    ps2_iop
 )
+
+# Android OpenGL ES 3.2 backend
+if(ANDROID)
+    find_library(ANDROID_EGL_LIBRARY EGL REQUIRED)
+    find_library(ANDROID_GLES3_LIBRARY GLESv3 REQUIRED)
+
+    target_link_libraries(ps2_runtime PUBLIC
+        ${ANDROID_EGL_LIBRARY}
+        ${ANDROID_GLES3_LIBRARY}
+    )
+
+    target_compile_definitions(ps2_runtime PUBLIC
+        PS2X_HAS_GLES32=1
+    )
+endif()
 
 if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_VITA AND NOT PS2X_IS_ANDROID)
     target_sources(ps2EntryRunner PRIVATE
