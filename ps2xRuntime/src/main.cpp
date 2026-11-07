@@ -35,8 +35,8 @@ namespace
         std::ofstream output(g_androidDiagnosticPath, std::ios::out | std::ios::trunc);
         if (output)
         {
-            output << "Manhunt 2 Android startup diagnostic\\n";
-            output << "BOOT_ELF=" << bootElfPath.string() << '\\n';
+            output << "Manhunt 2 Android startup diagnostic\n";
+            output << "BOOT_ELF=" << bootElfPath.string() << '\n';
             output.flush();
         }
 #else
@@ -52,7 +52,7 @@ namespace
         std::ofstream output(g_androidDiagnosticPath, std::ios::out | std::ios::app);
         if (output)
         {
-            output << message << '\\n';
+            output << message << '\n';
             output.flush();
         }
 #else
