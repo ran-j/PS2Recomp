@@ -28,6 +28,8 @@
 #include <thread>
 #include <unordered_map>
 #include <sstream>
+#include <filesystem>
+#include <mutex>
 
 namespace ps2_stubs
 {
@@ -89,6 +91,35 @@ struct ProgramHeader
 
 namespace
 {
+    std::mutex g_diagnosticLogMutex;
+    std::filesystem::path g_diagnosticLogPath;
+
+    void setPersistentDiagnosticLog(const std::filesystem::path &elfPath)
+    {
+        std::lock_guard<std::mutex> lock(g_diagnosticLogMutex);
+        g_diagnosticLogPath = elfPath.parent_path() / "manhunt2_runtime.log";
+        std::ofstream output(g_diagnosticLogPath, std::ios::out | std::ios::trunc);
+        if (output)
+        {
+            output << "Manhunt 2 Android runtime diagnostic log\\n";
+            output << "ELF=" << elfPath.string() << "\\n";
+            output.flush();
+        }
+    }
+
+    void writePersistentDiagnostic(const std::string &message)
+    {
+        std::lock_guard<std::mutex> lock(g_diagnosticLogMutex);
+        if (g_diagnosticLogPath.empty())
+            return;
+        std::ofstream output(g_diagnosticLogPath, std::ios::out | std::ios::app);
+        if (output)
+        {
+            output << message << '\\n';
+            output.flush();
+        }
+    }
+
     constexpr uint32_t kGuestHeapDefaultBase = 0x00100000u;
     constexpr uint32_t kGuestHeapDefaultAlignment = 16u;
     constexpr uint32_t kGuestHeapSafetyPad = 0x1000u;
@@ -795,6 +826,7 @@ bool PS2Runtime::initialize(const char *title)
 bool PS2Runtime::loadELF(const std::string &elfPath)
 {
     configureIoPathsFromElf(elfPath);
+    writePersistentDiagnostic("ELF_LOAD_BEGIN path=" + elfPath);
 
     std::ifstream file(elfPath, std::ios::binary);
     if (!file)
@@ -850,6 +882,15 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     {
         std::cerr << "ELF program-header table is out of range." << std::endl;
         return false;
+    }
+
+    {
+        std::ostringstream diagnostic;
+        diagnostic << "ELF_HEADER_OK size=" << fileSize
+                   << " entry=0x" << std::hex << header.entry
+                   << " phnum=" << std::dec << header.phnum
+                   << " phentsize=" << header.phentsize;
+        writePersistentDiagnostic(diagnostic.str());
     }
 
     m_cpuContext.pc = header.entry;
@@ -1045,6 +1086,14 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
                                       elfCrc32Valid);
 
     RUNTIME_LOG("ELF file loaded successfully. Entry point: 0x" << std::hex << m_cpuContext.pc << std::dec);
+    {
+        std::ostringstream diagnostic;
+        diagnostic << "ELF_LOAD_OK entry=0x" << std::hex << m_cpuContext.pc
+                   << " module_base=0x" << module.baseAddress
+                   << " module_size=0x" << module.size << std::dec
+                   << " crc32=" << (elfCrc32Valid ? "valid" : "unavailable");
+        writePersistentDiagnostic(diagnostic.str());
+    }
     return true;
 }
 
@@ -1101,6 +1150,9 @@ void PS2Runtime::configureIoPathsFromElf(const std::string &elfPath)
     }
 
     setIoPaths(paths);
+    setPersistentDiagnosticLog(paths.elfPath);
+    writePersistentDiagnostic("IO_PATHS_READY iso=" + paths.cdImage.string() +
+                              " elf_dir=" + paths.elfDirectory.string());
 }
 
 bool PS2Runtime::mountCdIsoImage(const std::filesystem::path &isoPath,
@@ -2556,6 +2608,7 @@ void PS2Runtime::HandleIntegerOverflow(R5900Context *ctx)
 
 void PS2Runtime::run()
 {
+    writePersistentDiagnostic("RUNTIME_RUN_BEGIN pc=0x" + [&]() { std::ostringstream out; out << std::hex << m_cpuContext.pc; return out.str(); }());
     m_stopRequested.store(false, std::memory_order_relaxed);
     ps2_stubs::resetSifState();
     resetIop();
@@ -2589,22 +2642,28 @@ void PS2Runtime::run()
             uint32_t pc = m_debugPc.load(std::memory_order_relaxed);
             RUNTIME_LOG("Game thread returned. PC=0x" << std::hex << pc
                       << " RA=0x" << static_cast<uint32_t>(_mm_extract_epi32(m_cpuContext.r[31], 0)) << std::dec << std::endl);
+            std::ostringstream diagnostic;
+            diagnostic << "GAME_THREAD_RETURN pc=0x" << std::hex << pc
+                       << " ra=0x" << static_cast<uint32_t>(_mm_extract_epi32(m_cpuContext.r[31], 0));
+            writePersistentDiagnostic(diagnostic.str());
         }
         catch (const std::exception &e)
         {
             std::cerr << "Error during program execution: " << e.what() << std::endl;
+            writePersistentDiagnostic(std::string("GAME_THREAD_EXCEPTION: ") + e.what());
         }
         catch (...)
         {
             std::cerr << "Error during program execution: unknown exception" << std::endl;
+            writePersistentDiagnostic("GAME_THREAD_EXCEPTION: unknown");
         }
         gameThreadFinished.store(true, std::memory_order_release); });
 
     uint64_t tick = 0;
     while (!isStopRequested() && !gameThreadFinished.load(std::memory_order_acquire))
     {
+        ++tick;
         PS2_IF_AGRESSIVE_LOGS({
-            tick++;
             if ((tick % 120) == 0)
             {
                 uint64_t curDma = m_memory.dmaStartCount();
@@ -2638,6 +2697,28 @@ void PS2Runtime::run()
         uint32_t presentWidth = FB_WIDTH;
         uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
         UploadFrame(frameTex, this, presentWidth, presentHeight);
+        if ((tick % 120u) == 0u)
+        {
+            const uint64_t curDma = m_memory.dmaStartCount();
+            const uint64_t curGif = m_memory.gifCopyCount();
+            const uint64_t curGs = m_memory.gsWriteCount();
+            const uint64_t curVif = m_memory.vifWriteCount();
+            const GSRegisters &gs = m_memory.gs();
+            const auto eeSnapshot = m_eeScheduler->snapshot();
+            std::ostringstream diagnostic;
+            diagnostic << "RUNTIME_TICK tick=" << tick
+                       << " pc=0x" << std::hex << m_debugPc.load(std::memory_order_relaxed)
+                       << " ra=0x" << m_debugRa.load(std::memory_order_relaxed)
+                       << " sp=0x" << m_debugSp.load(std::memory_order_relaxed)
+                       << " gp=0x" << m_debugGp.load(std::memory_order_relaxed)
+                       << " dispfb1=0x" << gs.dispfb1
+                       << " display1=0x" << gs.display1 << std::dec
+                       << " active_threads=" << eeSnapshot.threads.size()
+                       << " dma=" << curDma << " gif=" << curGif
+                       << " gs_writes=" << curGs << " vif=" << curVif
+                       << " frame=" << presentWidth << "x" << presentHeight;
+            writePersistentDiagnostic(diagnostic.str());
+        }
 
         BeginDrawing();
         ClearBackground(BLACK);
@@ -2684,4 +2765,5 @@ void PS2Runtime::run()
     CloseWindow();
 
     RUNTIME_LOG("[run] exiting loop");
+    writePersistentDiagnostic("RUNTIME_RUN_END");
 }
