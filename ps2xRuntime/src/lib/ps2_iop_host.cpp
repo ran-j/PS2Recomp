@@ -286,6 +286,31 @@ std::string PS2IopHostAdapter::hostPath(ps2x::iop::HostPathKind kind) const
     }
 }
 
+bool PS2IopHostAdapter::findCdFile(std::string_view path,
+                                           ps2x::iop::CdFileInfo &result) const
+{
+    result = {};
+    const PS2Runtime::IoPaths &paths = PS2Runtime::getIoPaths();
+    const ps2x::iop::ParsedPs2Path parsed = ps2x::iop::parsePs2Path(path);
+    if (!parsed || parsed.device != ps2x::iop::Ps2PathDevice::Cdrom ||
+        !paths.cdIsoImage || !paths.cdIsoImage->isOpen())
+    {
+        return false;
+    }
+
+    ps2x::iso9660::DirectoryEntry entry;
+    if (!paths.cdIsoImage->findFile(parsed.path, entry))
+    {
+        return false;
+    }
+
+    result.lsn = entry.extentLba;
+    result.size = entry.size;
+    result.directory = entry.isDirectory();
+    result.name = entry.name;
+    return true;
+}
+
 std::string PS2IopHostAdapter::translateGuestPath(std::string_view path) const
 {
     const PS2Runtime::IoPaths &paths = PS2Runtime::getIoPaths();

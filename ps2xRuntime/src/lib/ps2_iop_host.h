@@ -64,6 +64,7 @@ public:
                       ps2x::iop::GuestBuffer receive) override;
 
     std::string hostPath(ps2x::iop::HostPathKind kind) const override;
+    bool findCdFile(std::string_view path, ps2x::iop::CdFileInfo &result) const override;
     std::string translateGuestPath(std::string_view path) const override;
     uint64_t openHostFile(std::string_view path) override;
     bool hostFileSize(uint64_t handle, uint64_t &size) const override;
