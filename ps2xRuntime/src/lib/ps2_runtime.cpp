@@ -101,8 +101,8 @@ namespace
         std::ofstream output(g_diagnosticLogPath, std::ios::out | std::ios::trunc);
         if (output)
         {
-            output << "Manhunt 2 Android runtime diagnostic log\\n";
-            output << "ELF=" << elfPath.string() << "\\n";
+            output << "Manhunt 2 Android runtime diagnostic log\n";
+            output << "ELF=" << elfPath.string() << "\n";
             output.flush();
         }
     }
@@ -115,7 +115,7 @@ namespace
         std::ofstream output(g_diagnosticLogPath, std::ios::out | std::ios::app);
         if (output)
         {
-            output << message << '\\n';
+            output << message << '\n';
             output.flush();
         }
     }
@@ -2608,7 +2608,11 @@ void PS2Runtime::HandleIntegerOverflow(R5900Context *ctx)
 
 void PS2Runtime::run()
 {
-    writePersistentDiagnostic("RUNTIME_RUN_BEGIN pc=0x" + [&]() { std::ostringstream out; out << std::hex << m_cpuContext.pc; return out.str(); }());
+    {
+        std::ostringstream diagnostic;
+        diagnostic << "RUNTIME_RUN_BEGIN pc=0x" << std::hex << m_cpuContext.pc;
+        writePersistentDiagnostic(diagnostic.str());
+    }
     m_stopRequested.store(false, std::memory_order_relaxed);
     ps2_stubs::resetSifState();
     resetIop();
