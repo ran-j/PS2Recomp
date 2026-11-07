@@ -605,7 +605,7 @@ namespace ps2x::iop::detail
             // from its ISO9660 directory record. The old virtual-directory index
             // describes a host folder and its synthetic LSNs do not match sectors
             // in the mounted disc image.
-            ps2x::iop::CdFileInfo discEntry;
+            ps2x::iop::IopHost::CdFileInfo discEntry;
             const bool hasMountedDisc = !host.hostPath(HostPathKind::CdImage).empty();
             if (hasMountedDisc)
             {
