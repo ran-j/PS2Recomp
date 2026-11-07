@@ -2497,6 +2497,17 @@ bool PS2Runtime::eeCheckpointDue(uint32_t cycles) noexcept
 {
     const uint64_t currentTick = m_eeScheduler->currentVSyncTick();
     const uint64_t waitTicks = std::max<uint64_t>(1u, ticks);
+    static std::atomic<uint32_t> s_vsyncWaitLogCount{0u};
+    const uint32_t logIndex = s_vsyncWaitLogCount.fetch_add(1u, std::memory_order_relaxed);
+    if (logIndex < 128u)
+    {
+        RUNTIME_LOG("EE_VSYNC_WAIT index=" << logIndex
+                                           << " requested_ticks=" << ticks
+                                           << " current_tick=" << currentTick
+                                           << " target_tick=" << (currentTick + waitTicks)
+                                           << " resume_pc=0x" << std::hex << resumePc << std::dec
+                                           << std::endl);
+    }
     m_eeScheduler->waitVSync(currentTick + waitTicks - 1u,
                              0,
                              [resumePc](R5900Context &context)
