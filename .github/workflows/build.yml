@@ -1,6 +1,6 @@
 name: build
 
-on: [push, pull_request]
+on: [push, pull_request, workflow_dispatch]
 
 jobs:
   linux-gcc-clang:
@@ -30,13 +30,15 @@ jobs:
             export CC=clang
             export CXX=clang++
           fi
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS=-msse4.1 -DCMAKE_CXX_FLAGS=-msse4.1
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS=-msse4.1 -DCMAKE_CXX_FLAGS=-msse4.1 -DPS2X_IOP_BUILD_TESTS=ON
 
       - name: Build
         run: cmake --build build --config Release
 
       - name: Tests
-        run: ./build/ps2xTest/ps2x_tests
+        run: |
+          ./build/ps2xTest/ps2x_tests
+          ./build/ps2xIOP/ps2_iop_import_tests
 
   windows-msvc:
     strategy:
@@ -63,13 +65,14 @@ jobs:
       - name: Build
         shell: cmd
         run: |
-          cmake -B build
+          cmake -B build -DPS2X_IOP_BUILD_TESTS=ON
           cmake --build build --config Release
 
       - name: Tests
         shell: cmd
         run: |
           .\build\ps2xTest\Release\ps2x_tests.exe
+          .\build\ps2xIOP\Release\ps2_iop_import_tests.exe
       - name: Upload artifact
         uses: actions/upload-artifact@v6
         with:
