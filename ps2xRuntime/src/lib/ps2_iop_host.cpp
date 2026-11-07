@@ -286,10 +286,44 @@ std::string PS2IopHostAdapter::hostPath(ps2x::iop::HostPathKind kind) const
     }
 }
 
+bool PS2IopHostAdapter::findCdFile(std::string_view path,
+                                           ps2x::iop::IopHost::CdFileInfo &result) const
+{
+    result = {};
+    const PS2Runtime::IoPaths &paths = PS2Runtime::getIoPaths();
+    const ps2x::iop::ParsedPs2Path parsed = ps2x::iop::parsePs2Path(path);
+    if (!parsed || parsed.device != ps2x::iop::Ps2PathDevice::Cdrom ||
+        !paths.cdIsoImage || !paths.cdIsoImage->isOpen())
+    {
+        return false;
+    }
+
+    ps2x::iso9660::DirectoryEntry entry;
+    if (!paths.cdIsoImage->findFile(parsed.path, entry))
+    {
+        return false;
+    }
+
+    result.lsn = entry.extentLba;
+    result.size = entry.size;
+    result.directory = entry.isDirectory();
+    result.name = entry.name;
+    return true;
+}
+
 std::string PS2IopHostAdapter::translateGuestPath(std::string_view path) const
 {
     const PS2Runtime::IoPaths &paths = PS2Runtime::getIoPaths();
-    const PS2VfsMounts mounts{paths.hostRoot, paths.cdRoot, paths.mcRoot};
+    const ps2x::iop::ParsedPs2Path parsed = ps2x::iop::parsePs2Path(path);
+    if (parsed && parsed.device == ps2x::iop::Ps2PathDevice::Cdrom && paths.cdIsoImage)
+    {
+        ps2x::iso9660::DirectoryEntry entry;
+        if (!paths.cdIsoImage->findFile(parsed.path, entry) || entry.isDirectory())
+            return {};
+        return std::string("ps2x-iso://") + parsed.path;
+    }
+
+    const PS2VfsMounts mounts{paths.hostRoot, paths.cdRoot, paths.mcRoot, paths.cdIsoImage};
     std::filesystem::path hostPath;
     if (!m_runtime.vfs().resolveHostPath(path, mounts, hostPath))
         return {};
@@ -301,6 +335,29 @@ uint64_t PS2IopHostAdapter::openHostFile(std::string_view path)
     if (path.empty())
     {
         return 0u;
+    }
+
+    constexpr std::string_view kIsoHandlePrefix = "ps2x-iso://";
+    if (path.starts_with(kIsoHandlePrefix))
+    {
+        const PS2Runtime::IoPaths &paths = PS2Runtime::getIoPaths();
+        if (!paths.cdIsoImage)
+            return 0u;
+
+        ps2x::iso9660::DirectoryEntry entry;
+        if (!paths.cdIsoImage->findFile(path.substr(kIsoHandlePrefix.size()), entry) ||
+            entry.isDirectory())
+        {
+            return 0u;
+        }
+
+        std::lock_guard<std::mutex> lock(m_hostFileMutex);
+        uint64_t handle = m_nextHostFileHandle++;
+        if (handle == 0u)
+            handle = m_nextHostFileHandle++;
+        m_hostFiles.emplace(handle,
+                            HostFile{nullptr, entry.size, paths.cdIsoImage, std::move(entry)});
+        return handle;
     }
 
     const std::filesystem::path hostPath{std::string(path)};
@@ -337,7 +394,7 @@ bool PS2IopHostAdapter::hostFileSize(uint64_t handle, uint64_t &size) const
     size = 0u;
     std::lock_guard<std::mutex> lock(m_hostFileMutex);
     const auto it = m_hostFiles.find(handle);
-    if (it == m_hostFiles.end() || !it->second.stream)
+    if (it == m_hostFiles.end() || (!it->second.stream && !it->second.isoImage))
     {
         return false;
     }
@@ -359,10 +416,20 @@ bool PS2IopHostAdapter::readHostFile(uint64_t handle,
 
     std::lock_guard<std::mutex> lock(m_hostFileMutex);
     const auto it = m_hostFiles.find(handle);
-    if (it == m_hostFiles.end() || !it->second.stream)
+    if (it == m_hostFiles.end())
     {
         return false;
     }
+    if (it->second.isoImage)
+    {
+        return it->second.isoImage->readFile(it->second.isoEntry,
+                                             offset,
+                                             destination,
+                                             size,
+                                             &bytesRead);
+    }
+    if (!it->second.stream)
+        return false;
 
 #if defined(_WIN32)
     if (offset > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) ||

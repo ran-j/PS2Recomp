@@ -1,6 +1,9 @@
 #pragma once
 
+#include "ps2x/iop/iop_host.h"
+
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -13,7 +16,7 @@ namespace ps2x::iop::detail
     class IopIoman
     {
     public:
-        explicit IopIoman(IopMemory &memory) noexcept;
+        IopIoman(IopHost &host, IopMemory &memory) noexcept;
 
         void reset();
         [[nodiscard]] bool dispatchImport(uint16_t ordinal, IopCpuState &cpu, IopGuestExecutor &executor);
@@ -26,7 +29,16 @@ namespace ps2x::iop::detail
             std::string name;
         };
 
+        struct OpenFile
+        {
+            uint64_t hostHandle = 0u;
+            uint64_t offset = 0u;
+            uint64_t size = 0u;
+        };
+
+        IopHost &m_host;
         IopMemory &m_memory;
         std::vector<Device> m_devices;
+        std::map<int32_t, OpenFile> m_openFiles;
     };
 }

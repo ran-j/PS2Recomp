@@ -661,7 +661,12 @@ namespace ps2_stubs
 
     void sceCdStatus(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        setReturnS32(ctx, g_cdInitialized ? 6 : 0);
+        // CD/DVD reads in this runtime are synchronous: there is no pending
+        // hardware read to report. SCECdStatPause (0x0A) is the idle/paused
+        // state expected by games that wait for the drive before booting.
+        // Returning SCECdStatRead (6) forever can trap those boot loops.
+        constexpr int32_t kCdStatusPause = 0x0A;
+        setReturnS32(ctx, g_cdInitialized ? kCdStatusPause : 0);
     }
 
     void sceCdStInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

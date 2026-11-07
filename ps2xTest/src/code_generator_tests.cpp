@@ -2006,6 +2006,28 @@ void register_code_generator_tests()
                      "jalr fallback should not dispatch directly to tail-jump delay slot");
         });
 
+        tc.Run("VCALLMSR reads CMSAR0 without indexing past VI registers", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+
+            Instruction viSource{};
+            viSource.rs = COP2_CO;
+            viSource.function = VU0_S1_VCALLMSR;
+            viSource.rd = 3;
+            const std::string viCode = gen.translateVUInstruction(viSource);
+            t.IsTrue(viCode.find("ctx->vi[3] & 0x1FF") != std::string::npos,
+                     "VCALLMSR with VI3 must read the ordinary VI register");
+
+            Instruction cmsarSource{};
+            cmsarSource.rs = COP2_CO;
+            cmsarSource.function = VU0_S1_VCALLMSR;
+            cmsarSource.rd = VU0_CR_CMSAR0;
+            const std::string cmsarCode = gen.translateVUInstruction(cmsarSource);
+            t.IsTrue(cmsarCode.find("ctx->vu0_cmsar0 & 0x1FF") != std::string::npos,
+                     "VCALLMSR with CMSAR0 must read the dedicated control-register field");
+            t.IsTrue(cmsarCode.find("ctx->vi[27]") == std::string::npos,
+                     "VCALLMSR must never index VI[27], because VI has only 16 entries");
+        });
+
         tc.Run("VU random helpers emit line comments on separate lines", [](TestCase &t) {
             CodeGenerator gen({}, {});
 

@@ -13,11 +13,13 @@
 #include "ps2_host_backend.h"
 #include "ps2_iop_host.h"
 #include "ps2x/iop/iop_subsystem.h"
+#include "runtime/iso9660_reader.h"
 
 #include <iostream>
 #include <stdexcept>
 #include <fstream>
 #include <algorithm>
+#include <cctype>
 #include <array>
 #include <cstring>
 #include <limits>
@@ -26,6 +28,8 @@
 #include <thread>
 #include <unordered_map>
 #include <sstream>
+#include <filesystem>
+#include <mutex>
 
 namespace ps2_stubs
 {
@@ -87,6 +91,34 @@ struct ProgramHeader
 
 namespace
 {
+    std::mutex g_diagnosticLogMutex;
+    std::filesystem::path g_diagnosticLogPath;
+
+    void setPersistentDiagnosticLog(const std::filesystem::path &elfPath)
+    {
+        std::lock_guard<std::mutex> lock(g_diagnosticLogMutex);
+        g_diagnosticLogPath = elfPath.parent_path() / "manhunt2_runtime.log";
+        std::ofstream output(g_diagnosticLogPath, std::ios::out | std::ios::app);
+        if (output)
+        {
+            output << "RUNTIME_LOG_ATTACHED ELF=" << elfPath.string() << '\n';
+            output.flush();
+        }
+    }
+
+    void writePersistentDiagnostic(const std::string &message)
+    {
+        std::lock_guard<std::mutex> lock(g_diagnosticLogMutex);
+        if (g_diagnosticLogPath.empty())
+            return;
+        std::ofstream output(g_diagnosticLogPath, std::ios::out | std::ios::app);
+        if (output)
+        {
+            output << message << '\n';
+            output.flush();
+        }
+    }
+
     constexpr uint32_t kGuestHeapDefaultBase = 0x00100000u;
     constexpr uint32_t kGuestHeapDefaultAlignment = 16u;
     constexpr uint32_t kGuestHeapSafetyPad = 0x1000u;
@@ -107,7 +139,8 @@ namespace
         bool wrapped = false;
     };
 
-    thread_local DispatchHistory g_dispatchHistory;
+    std::mutex g_dispatchHistoryMutex;
+    DispatchHistory g_dispatchHistory;
 
     bool computeFileCrc32(const std::string &path, uint32_t &crcOut)
     {
@@ -153,6 +186,7 @@ namespace
 
     void pushDispatchPc(uint32_t pc)
     {
+        std::lock_guard<std::mutex> lock(g_dispatchHistoryMutex);
         DispatchHistory &h = g_dispatchHistory;
         h.pcs[h.next] = pc;
         h.next = (h.next + 1u) % static_cast<uint32_t>(h.pcs.size());
@@ -164,6 +198,7 @@ namespace
 
     std::string formatDispatchHistory()
     {
+        std::lock_guard<std::mutex> lock(g_dispatchHistoryMutex);
         const DispatchHistory &h = g_dispatchHistory;
         const uint32_t count = h.wrapped ? static_cast<uint32_t>(h.pcs.size()) : h.next;
         if (count == 0u)
@@ -471,6 +506,39 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
         }
     }
 
+    PS2_IF_AGRESSIVE_LOGS({
+        static uint32_t s_frameStatsLogCount = 0u;
+        if (s_frameStatsLogCount < 8u || (s_frameStatsLogCount % 30u) == 0u)
+        {
+            uint64_t nonBlackPixels = 0u;
+            uint64_t rgbSum = 0u;
+            uint64_t hash = 14695981039346656037ull;
+            for (size_t i = 0u; i + 3u < s_uploadBuffer.size(); i += 4u)
+            {
+                const uint8_t r = s_uploadBuffer[i + 0u];
+                const uint8_t g = s_uploadBuffer[i + 1u];
+                const uint8_t b = s_uploadBuffer[i + 2u];
+                if (r != 0u || g != 0u || b != 0u)
+                    ++nonBlackPixels;
+                rgbSum += static_cast<uint64_t>(r) + static_cast<uint64_t>(g) + static_cast<uint64_t>(b);
+                for (size_t channel = 0u; channel < 4u; ++channel)
+                {
+                    hash ^= s_uploadBuffer[i + channel];
+                    hash *= 1099511628211ull;
+                }
+            }
+            std::cout << "[frame:stats] idx=" << s_frameStatsLogCount
+                      << " tick=" << currentTick
+                      << " nonBlackPixels=" << nonBlackPixels
+                      << " rgbSum=" << rgbSum
+                      << " fnv1a64=0x" << std::hex << hash << std::dec
+                      << " imageUploads=" << rt->gs().nativeImageUploadCount()
+                      << " gifPackets=" << rt->gs().nativePackedGIFPacketCount()
+                      << std::endl;
+        }
+        ++s_frameStatsLogCount;
+    });
+
     UpdateTexture(tex, s_uploadBuffer.data());
     outWidth = width;
     outHeight = height;
@@ -760,11 +828,13 @@ bool PS2Runtime::initialize(const char *title)
 bool PS2Runtime::loadELF(const std::string &elfPath)
 {
     configureIoPathsFromElf(elfPath);
+    writePersistentDiagnostic("ELF_LOAD_BEGIN path=" + elfPath);
 
     std::ifstream file(elfPath, std::ios::binary);
     if (!file)
     {
         std::cerr << "Failed to open ELF file: " << elfPath << std::endl;
+        writePersistentDiagnostic("ELF_OPEN_FAILED");
         return false;
     }
 
@@ -773,6 +843,7 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     if (fileSize < static_cast<std::streamoff>(sizeof(ElfHeader)))
     {
         std::cerr << "ELF file is too small: " << elfPath << std::endl;
+        writePersistentDiagnostic("ELF_TOO_SMALL size=" + std::to_string(fileSize));
         return false;
     }
     file.seekg(0, std::ios::beg);
@@ -781,30 +852,35 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     if (!file.read(reinterpret_cast<char *>(&header), sizeof(header)))
     {
         std::cerr << "Failed to read ELF header from: " << elfPath << std::endl;
+        writePersistentDiagnostic("ELF_HEADER_READ_FAILED");
         return false;
     }
 
     if (header.magic != ELF_MAGIC)
     {
         std::cerr << "Invalid ELF magic number" << std::endl;
+        writePersistentDiagnostic("ELF_INVALID_MAGIC");
         return false;
     }
 
     if (header.elf_class != 1u || header.endianness != 1u)
     {
         std::cerr << "Unsupported ELF format (expected 32-bit little-endian)." << std::endl;
+        writePersistentDiagnostic("ELF_UNSUPPORTED_CLASS_OR_ENDIAN");
         return false;
     }
 
     if (header.machine != EM_MIPS || header.type != ET_EXEC)
     {
         std::cerr << "Not a MIPS executable ELF file" << std::endl;
+        writePersistentDiagnostic("ELF_NOT_MIPS_EXECUTABLE");
         return false;
     }
 
     if (header.phnum != 0u && header.phentsize < sizeof(ProgramHeader))
     {
         std::cerr << "Unsupported ELF program-header entry size: " << header.phentsize << std::endl;
+        writePersistentDiagnostic("ELF_BAD_PROGRAM_HEADER_SIZE");
         return false;
     }
 
@@ -814,7 +890,17 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     if (programHeaderTableEnd > static_cast<uint64_t>(fileSize))
     {
         std::cerr << "ELF program-header table is out of range." << std::endl;
+        writePersistentDiagnostic("ELF_PROGRAM_HEADER_TABLE_OUT_OF_RANGE");
         return false;
+    }
+
+    {
+        std::ostringstream diagnostic;
+        diagnostic << "ELF_HEADER_OK size=" << fileSize
+                   << " entry=0x" << std::hex << header.entry
+                   << " phnum=" << std::dec << header.phnum
+                   << " phentsize=" << header.phentsize;
+        writePersistentDiagnostic(diagnostic.str());
     }
 
     m_cpuContext.pc = header.entry;
@@ -946,6 +1032,7 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     if (!loadedAnySegment)
     {
         std::cerr << "ELF contains no loadable PT_LOAD segments." << std::endl;
+        writePersistentDiagnostic("ELF_NO_LOADABLE_SEGMENTS");
         return false;
     }
 
@@ -998,6 +1085,7 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     if (!m_romDevice.configure(identity, &romError))
     {
         std::cerr << "[ROM0] failed to configure profile: " << romError << std::endl;
+        writePersistentDiagnostic("ROM_PROFILE_FAILED: " + romError);
         return false;
     }
 
@@ -1010,6 +1098,14 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
                                       elfCrc32Valid);
 
     RUNTIME_LOG("ELF file loaded successfully. Entry point: 0x" << std::hex << m_cpuContext.pc << std::dec);
+    {
+        std::ostringstream diagnostic;
+        diagnostic << "ELF_LOAD_OK entry=0x" << std::hex << m_cpuContext.pc
+                   << " module_base=0x" << module.baseAddress
+                   << " module_size=0x" << module.size << std::dec
+                   << " crc32=" << (elfCrc32Valid ? "valid" : "unavailable");
+        writePersistentDiagnostic(diagnostic.str());
+    }
     return true;
 }
 
@@ -1066,6 +1162,189 @@ void PS2Runtime::configureIoPathsFromElf(const std::string &elfPath)
     }
 
     setIoPaths(paths);
+    setPersistentDiagnosticLog(paths.elfPath);
+    writePersistentDiagnostic("IO_PATHS_READY iso=" + paths.cdImage.string() +
+                              " elf_dir=" + paths.elfDirectory.string());
+}
+
+bool PS2Runtime::mountCdIsoImage(const std::filesystem::path &isoPath,
+                                 std::string_view bootElfName,
+                                 std::string *error)
+{
+    const auto fail = [error](const std::string &message)
+    {
+        if (error)
+            *error = message;
+        return false;
+    };
+
+    if (isoPath.empty() || bootElfName.empty())
+        return fail("ISO path and expected PS2 boot ELF name are required");
+
+    auto image = std::make_shared<ps2x::iso9660::Image>();
+    std::string imageError;
+    const std::filesystem::path normalizedIsoPath = normalizeAbsolutePath(isoPath);
+    if (normalizedIsoPath.empty() || !image->open(normalizedIsoPath, &imageError))
+        return fail(imageError.empty() ? "Unable to open the selected ISO image" : imageError);
+
+    ps2x::iso9660::DirectoryEntry bootEntry;
+    if (!image->findFile(bootElfName, bootEntry) &&
+        !image->findFileRecursive(bootElfName, bootEntry))
+    {
+        return fail("The ISO does not contain the expected boot ELF: " + std::string(bootElfName));
+    }
+    if (bootEntry.isDirectory() || bootEntry.size < 52u)
+        return fail("The selected boot entry is not a valid-sized PS2 ELF file");
+
+    std::array<uint8_t, 52u> elfHeader{};
+    size_t headerBytesRead = 0u;
+    if (!image->readFile(bootEntry, 0u, elfHeader.data(), elfHeader.size(), &headerBytesRead) ||
+        headerBytesRead != elfHeader.size())
+    {
+        return fail("Unable to read the PS2 boot ELF header from the ISO");
+    }
+
+    if (elfHeader[0] != 0x7Fu || elfHeader[1] != 'E' ||
+        elfHeader[2] != 'L' || elfHeader[3] != 'F')
+    {
+        return fail("The selected boot file does not have an ELF signature");
+    }
+    if (elfHeader[4] != 1u || elfHeader[5] != 1u || elfHeader[6] != 1u)
+        return fail("The selected boot ELF is not a 32-bit little-endian ELF file");
+    if (elfHeader[18] != 8u || elfHeader[19] != 0u)
+        return fail("The selected boot ELF is not for the MIPS architecture");
+
+    ps2x::iso9660::DirectoryEntry systemCnfEntry;
+    if (!image->findFile("SYSTEM.CNF", systemCnfEntry) &&
+        !image->findFileRecursive("SYSTEM.CNF", systemCnfEntry))
+    {
+        return fail("SYSTEM.CNF was not found in the selected ISO");
+    }
+
+    std::vector<uint8_t> systemCnfBytes;
+    if (!image->readFileFully(systemCnfEntry, systemCnfBytes))
+        return fail("Unable to read SYSTEM.CNF from the selected ISO");
+
+    std::string systemCnf(systemCnfBytes.begin(), systemCnfBytes.end());
+    std::transform(systemCnf.begin(), systemCnf.end(), systemCnf.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::toupper(ch)); });
+    std::string expectedBootName(bootElfName);
+    const size_t versionSuffix = expectedBootName.find(';');
+    if (versionSuffix != std::string::npos)
+        expectedBootName.erase(versionSuffix);
+    std::transform(expectedBootName.begin(), expectedBootName.end(), expectedBootName.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::toupper(ch)); });
+
+    if (systemCnf.find("BOOT2") == std::string::npos ||
+        systemCnf.find(expectedBootName) == std::string::npos)
+    {
+        return fail("SYSTEM.CNF does not reference the expected boot ELF " + expectedBootName);
+    }
+
+    IoPaths paths = runtimeIoPaths();
+    paths.cdImage = normalizedIsoPath;
+    paths.cdIsoImage = std::move(image);
+    setIoPaths(paths);
+
+    if (error)
+        error->clear();
+    std::cout << "[ISO9660] Mounted " << normalizedIsoPath.string()
+              << " | boot=" << bootEntry.name
+              << " | LBA=" << bootEntry.extentLba
+              << " | size=" << bootEntry.size << std::endl;
+    return true;
+}
+
+bool PS2Runtime::extractMountedCdIsoBootElf(std::string_view bootElfName,
+                                            const std::filesystem::path &destinationPath,
+                                            std::string *error)
+{
+    const auto fail = [error](const std::string &message)
+    {
+        if (error)
+            *error = message;
+        return false;
+    };
+
+    const IoPaths &paths = runtimeIoPaths();
+    if (!paths.cdIsoImage || !paths.cdIsoImage->isOpen())
+        return fail("No CD-ROM ISO image is mounted");
+    if (destinationPath.empty())
+        return fail("Boot ELF destination path is empty");
+
+    const std::filesystem::path normalizedDestination = normalizeAbsolutePath(destinationPath);
+    if (normalizedDestination.empty() || normalizedDestination == paths.cdImage)
+        return fail("Boot ELF destination must be a writable file separate from the ISO image");
+
+    ps2x::iso9660::DirectoryEntry bootEntry;
+    if (!paths.cdIsoImage->findFile(bootElfName, bootEntry) &&
+        !paths.cdIsoImage->findFileRecursive(bootElfName, bootEntry))
+    {
+        return fail("Mounted ISO no longer contains the expected boot ELF");
+    }
+
+    std::vector<uint8_t> elfBytes;
+    if (!paths.cdIsoImage->readFileFully(bootEntry, elfBytes) || elfBytes.size() < 52u)
+        return fail("Unable to extract the complete boot ELF from the mounted ISO");
+
+    if (elfBytes[0] != 0x7Fu || elfBytes[1] != 'E' ||
+        elfBytes[2] != 'L' || elfBytes[3] != 'F' ||
+        elfBytes[4] != 1u || elfBytes[5] != 1u ||
+        elfBytes[18] != 8u || elfBytes[19] != 0u)
+    {
+        return fail("Extracted boot file failed the PS2 ELF header check");
+    }
+
+    std::error_code filesystemError;
+    const std::filesystem::path parent = normalizedDestination.parent_path();
+    if (!parent.empty())
+    {
+        std::filesystem::create_directories(parent, filesystemError);
+        if (filesystemError)
+            return fail("Unable to create the boot ELF output directory: " + filesystemError.message());
+    }
+
+    std::filesystem::path temporaryPath = normalizedDestination;
+    temporaryPath += ".tmp";
+    {
+        std::ofstream output(temporaryPath, std::ios::binary | std::ios::trunc);
+        if (!output)
+            return fail("Unable to create the extracted boot ELF file");
+        output.write(reinterpret_cast<const char *>(elfBytes.data()),
+                     static_cast<std::streamsize>(elfBytes.size()));
+        output.flush();
+        if (!output.good())
+        {
+            output.close();
+            std::filesystem::remove(temporaryPath, filesystemError);
+            return fail("Failed while writing the extracted boot ELF");
+        }
+    }
+
+    std::filesystem::rename(temporaryPath, normalizedDestination, filesystemError);
+    if (filesystemError)
+    {
+        filesystemError.clear();
+        std::filesystem::remove(normalizedDestination, filesystemError);
+        if (filesystemError)
+        {
+            std::filesystem::remove(temporaryPath, filesystemError);
+            return fail("Unable to replace the previous boot ELF file");
+        }
+        std::filesystem::rename(temporaryPath, normalizedDestination, filesystemError);
+    }
+    if (filesystemError)
+    {
+        std::filesystem::remove(temporaryPath, filesystemError);
+        return fail("Unable to finalize the extracted boot ELF file");
+    }
+
+    if (error)
+        error->clear();
+    std::cout << "[ISO9660] Extracted boot ELF " << bootEntry.name
+              << " -> " << normalizedDestination.string()
+              << " (" << elfBytes.size() << " bytes)" << std::endl;
+    return true;
 }
 
 namespace
@@ -2218,6 +2497,17 @@ bool PS2Runtime::eeCheckpointDue(uint32_t cycles) noexcept
 {
     const uint64_t currentTick = m_eeScheduler->currentVSyncTick();
     const uint64_t waitTicks = std::max<uint64_t>(1u, ticks);
+    static std::atomic<uint32_t> s_vsyncWaitLogCount{0u};
+    const uint32_t logIndex = s_vsyncWaitLogCount.fetch_add(1u, std::memory_order_relaxed);
+    if (logIndex < 128u)
+    {
+        RUNTIME_LOG("EE_VSYNC_WAIT index=" << logIndex
+                                           << " requested_ticks=" << ticks
+                                           << " current_tick=" << currentTick
+                                           << " target_tick=" << (currentTick + waitTicks)
+                                           << " resume_pc=0x" << std::hex << resumePc << std::dec
+                                           << std::endl);
+    }
     m_eeScheduler->waitVSync(currentTick + waitTicks - 1u,
                              0,
                              [resumePc](R5900Context &context)
@@ -2341,6 +2631,11 @@ void PS2Runtime::HandleIntegerOverflow(R5900Context *ctx)
 
 void PS2Runtime::run()
 {
+    {
+        std::ostringstream diagnostic;
+        diagnostic << "RUNTIME_RUN_BEGIN pc=0x" << std::hex << m_cpuContext.pc;
+        writePersistentDiagnostic(diagnostic.str());
+    }
     m_stopRequested.store(false, std::memory_order_relaxed);
     ps2_stubs::resetSifState();
     resetIop();
@@ -2374,22 +2669,28 @@ void PS2Runtime::run()
             uint32_t pc = m_debugPc.load(std::memory_order_relaxed);
             RUNTIME_LOG("Game thread returned. PC=0x" << std::hex << pc
                       << " RA=0x" << static_cast<uint32_t>(_mm_extract_epi32(m_cpuContext.r[31], 0)) << std::dec << std::endl);
+            std::ostringstream diagnostic;
+            diagnostic << "GAME_THREAD_RETURN pc=0x" << std::hex << pc
+                       << " ra=0x" << static_cast<uint32_t>(_mm_extract_epi32(m_cpuContext.r[31], 0));
+            writePersistentDiagnostic(diagnostic.str());
         }
         catch (const std::exception &e)
         {
             std::cerr << "Error during program execution: " << e.what() << std::endl;
+            writePersistentDiagnostic(std::string("GAME_THREAD_EXCEPTION: ") + e.what());
         }
         catch (...)
         {
             std::cerr << "Error during program execution: unknown exception" << std::endl;
+            writePersistentDiagnostic("GAME_THREAD_EXCEPTION: unknown");
         }
         gameThreadFinished.store(true, std::memory_order_release); });
 
     uint64_t tick = 0;
     while (!isStopRequested() && !gameThreadFinished.load(std::memory_order_acquire))
     {
+        ++tick;
         PS2_IF_AGRESSIVE_LOGS({
-            tick++;
             if ((tick % 120) == 0)
             {
                 uint64_t curDma = m_memory.dmaStartCount();
@@ -2423,6 +2724,52 @@ void PS2Runtime::run()
         uint32_t presentWidth = FB_WIDTH;
         uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
         UploadFrame(frameTex, this, presentWidth, presentHeight);
+        if ((tick % 120u) == 0u)
+        {
+            const uint64_t curDma = m_memory.dmaStartCount();
+            const uint64_t curGif = m_memory.gifCopyCount();
+            const uint64_t curGs = m_memory.gsWriteCount();
+            const uint64_t curVif = m_memory.vifWriteCount();
+            const GSRegisters &gs = m_memory.gs();
+            const auto eeSnapshot = m_eeScheduler->snapshot();
+            std::ostringstream diagnostic;
+            const uint32_t diagnosticPc = m_debugPc.load(std::memory_order_relaxed);
+            uint32_t instructionWords[4]{};
+            const uint8_t *diagnosticRam = m_memory.getRDRAM();
+            if (diagnosticRam && diagnosticPc <= PS2_RAM_MASK - sizeof(instructionWords))
+            {
+                std::memcpy(instructionWords, diagnosticRam + (diagnosticPc & PS2_RAM_MASK), sizeof(instructionWords));
+            }
+            diagnostic << "RUNTIME_TICK tick=" << tick
+                       << " pc=0x" << std::hex << diagnosticPc
+                       << " ra=0x" << m_debugRa.load(std::memory_order_relaxed)
+                       << " sp=0x" << m_debugSp.load(std::memory_order_relaxed)
+                       << " gp=0x" << m_debugGp.load(std::memory_order_relaxed)
+                       << " insn=" << instructionWords[0] << "," << instructionWords[1]
+                       << "," << instructionWords[2] << "," << instructionWords[3]
+                       << " dispatch_trace=" << formatDispatchHistory()
+                       << " vsync=" << m_eeScheduler->currentVSyncTick()
+                       << " ee_cycle=" << eeSnapshot.eeCycle
+                       << " next_event_cycle=" << eeSnapshot.nextEventCycle
+                       << " running_thread=" << eeSnapshot.runningThreadId
+                       << " pmode=0x" << gs.pmode
+                       << " smode2=0x" << gs.smode2
+                       << " dispfb1=0x" << gs.dispfb1
+                       << " display1=0x" << gs.display1 << std::dec
+                       << " active_threads=" << eeSnapshot.threads.size();
+            if (!eeSnapshot.threads.empty())
+            {
+                const EeThreadSnapshot &thread = eeSnapshot.threads.front();
+                diagnostic << " thread_id=" << thread.id
+                           << " thread_status=" << static_cast<uint32_t>(thread.status)
+                           << " wait_reason=" << static_cast<uint32_t>(thread.waitReason)
+                           << " thread_pc=0x" << std::hex << thread.pc << std::dec;
+            }
+            diagnostic << " dma=" << curDma << " gif=" << curGif
+                       << " gs_writes=" << curGs << " vif=" << curVif
+                       << " frame=" << presentWidth << "x" << presentHeight;
+            writePersistentDiagnostic(diagnostic.str());
+        }
 
         BeginDrawing();
         ClearBackground(BLACK);
@@ -2469,4 +2816,5 @@ void PS2Runtime::run()
     CloseWindow();
 
     RUNTIME_LOG("[run] exiting loop");
+    writePersistentDiagnostic("RUNTIME_RUN_END");
 }

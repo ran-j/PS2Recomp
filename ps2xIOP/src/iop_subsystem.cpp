@@ -23,6 +23,7 @@ namespace ps2x::iop
             coreServices.emplace_back(detail::createMcservService(host));
             coreServices.emplace_back(detail::createDbcmanService(host));
             coreServices.emplace_back(detail::createLibSdService(host));
+            coreServices.emplace_back(detail::createCdvdmanService(host));
             refreshServiceModuleKeys();
             rebuildRoutes();
         }
@@ -177,9 +178,7 @@ namespace ps2x::iop
             {
                 const RpcAbi selected = service->selectRpcAbi(request);
                 if (selected != RpcAbi::RuntimeDefault)
-                {
                     return selected;
-                }
             }
         }
         return RpcAbi::RuntimeDefault;
@@ -188,9 +187,7 @@ namespace ps2x::iop
     bool IopSubsystem::canBindRpc(uint32_t sid) const noexcept
     {
         if (m_impl->routes.find(sid) != m_impl->routes.end())
-        {
             return true;
-        }
         return m_impl->emulator.hasRpcServer(sid);
     }
 
@@ -201,9 +198,7 @@ namespace ps2x::iop
 
         RpcResult emulated = m_impl->emulator.handleRpc(request);
         if (emulated.handled || !hle)
-        {
             return emulated;
-        }
         return hle->handleRpc(request);
     }
 
@@ -212,9 +207,7 @@ namespace ps2x::iop
         for (auto &service : m_impl->coreServices)
         {
             if (service && m_impl->serviceActive(*service))
-            {
                 service->onSifTransfer(transfer);
-            }
         }
         m_impl->emulator.onSifTransfer(transfer);
     }
@@ -259,9 +252,7 @@ namespace ps2x::iop
         snapshot.emulatorRpcServers = m_impl->emulator.rpcServerCount();
         snapshot.diagnostics = m_impl->loadOutcomes;
         if (!m_impl->lastError.empty())
-        {
             snapshot.diagnostics.push_back(m_impl->lastError);
-        }
 
         for (const auto &service : m_impl->coreServices)
         {
