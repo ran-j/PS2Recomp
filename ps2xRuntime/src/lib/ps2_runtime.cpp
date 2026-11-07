@@ -98,11 +98,10 @@ namespace
     {
         std::lock_guard<std::mutex> lock(g_diagnosticLogMutex);
         g_diagnosticLogPath = elfPath.parent_path() / "manhunt2_runtime.log";
-        std::ofstream output(g_diagnosticLogPath, std::ios::out | std::ios::trunc);
+        std::ofstream output(g_diagnosticLogPath, std::ios::out | std::ios::app);
         if (output)
         {
-            output << "Manhunt 2 Android runtime diagnostic log\n";
-            output << "ELF=" << elfPath.string() << "\n";
+            output << "RUNTIME_LOG_ATTACHED ELF=" << elfPath.string() << '\n';
             output.flush();
         }
     }
@@ -832,6 +831,7 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     if (!file)
     {
         std::cerr << "Failed to open ELF file: " << elfPath << std::endl;
+        writePersistentDiagnostic("ELF_OPEN_FAILED");
         return false;
     }
 
@@ -840,6 +840,7 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     if (fileSize < static_cast<std::streamoff>(sizeof(ElfHeader)))
     {
         std::cerr << "ELF file is too small: " << elfPath << std::endl;
+        writePersistentDiagnostic("ELF_TOO_SMALL size=" + std::to_string(fileSize));
         return false;
     }
     file.seekg(0, std::ios::beg);
@@ -848,30 +849,35 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     if (!file.read(reinterpret_cast<char *>(&header), sizeof(header)))
     {
         std::cerr << "Failed to read ELF header from: " << elfPath << std::endl;
+        writePersistentDiagnostic("ELF_HEADER_READ_FAILED");
         return false;
     }
 
     if (header.magic != ELF_MAGIC)
     {
         std::cerr << "Invalid ELF magic number" << std::endl;
+        writePersistentDiagnostic("ELF_INVALID_MAGIC");
         return false;
     }
 
     if (header.elf_class != 1u || header.endianness != 1u)
     {
         std::cerr << "Unsupported ELF format (expected 32-bit little-endian)." << std::endl;
+        writePersistentDiagnostic("ELF_UNSUPPORTED_CLASS_OR_ENDIAN");
         return false;
     }
 
     if (header.machine != EM_MIPS || header.type != ET_EXEC)
     {
         std::cerr << "Not a MIPS executable ELF file" << std::endl;
+        writePersistentDiagnostic("ELF_NOT_MIPS_EXECUTABLE");
         return false;
     }
 
     if (header.phnum != 0u && header.phentsize < sizeof(ProgramHeader))
     {
         std::cerr << "Unsupported ELF program-header entry size: " << header.phentsize << std::endl;
+        writePersistentDiagnostic("ELF_BAD_PROGRAM_HEADER_SIZE");
         return false;
     }
 
@@ -881,6 +887,7 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     if (programHeaderTableEnd > static_cast<uint64_t>(fileSize))
     {
         std::cerr << "ELF program-header table is out of range." << std::endl;
+        writePersistentDiagnostic("ELF_PROGRAM_HEADER_TABLE_OUT_OF_RANGE");
         return false;
     }
 
@@ -1022,6 +1029,7 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     if (!loadedAnySegment)
     {
         std::cerr << "ELF contains no loadable PT_LOAD segments." << std::endl;
+        writePersistentDiagnostic("ELF_NO_LOADABLE_SEGMENTS");
         return false;
     }
 
@@ -1074,6 +1082,7 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     if (!m_romDevice.configure(identity, &romError))
     {
         std::cerr << "[ROM0] failed to configure profile: " << romError << std::endl;
+        writePersistentDiagnostic("ROM_PROFILE_FAILED: " + romError);
         return false;
     }
 
