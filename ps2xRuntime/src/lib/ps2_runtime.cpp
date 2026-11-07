@@ -494,19 +494,11 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
                     hash *= 1099511628211ull;
                 }
             }
-            const auto gsSnapshot = rt->gs().getDebugSnapshot();
             std::cout << "[frame:stats] idx=" << s_frameStatsLogCount
                       << " tick=" << currentTick
                       << " nonBlackPixels=" << nonBlackPixels
                       << " rgbSum=" << rgbSum
-                      << " fnv1a64=0x" << std::hex << hash
-                      << " pmode=0x" << gsSnapshot.pmode
-                      << " smode2=0x" << gsSnapshot.smode2
-                      << " dispfb1=0x" << gsSnapshot.dispfb1
-                      << " display1=0x" << gsSnapshot.display1
-                      << " dispfb2=0x" << gsSnapshot.dispfb2
-                      << " display2=0x" << gsSnapshot.display2
-                      << std::dec
+                      << " fnv1a64=0x" << std::hex << hash << std::dec
                       << " imageUploads=" << rt->gs().nativeImageUploadCount()
                       << " gifPackets=" << rt->gs().nativePackedGIFPacketCount()
                       << std::endl;
