@@ -2748,10 +2748,24 @@ void PS2Runtime::run()
                        << " insn=" << instructionWords[0] << "," << instructionWords[1]
                        << "," << instructionWords[2] << "," << instructionWords[3]
                        << " dispatch_trace=" << formatDispatchHistory()
+                       << " vsync=" << m_eeScheduler->currentVSyncTick()
+                       << " ee_cycle=" << eeSnapshot.eeCycle
+                       << " next_event_cycle=" << eeSnapshot.nextEventCycle
+                       << " running_thread=" << eeSnapshot.runningThreadId
+                       << " pmode=0x" << gs.pmode
+                       << " smode2=0x" << gs.smode2
                        << " dispfb1=0x" << gs.dispfb1
                        << " display1=0x" << gs.display1 << std::dec
-                       << " active_threads=" << eeSnapshot.threads.size()
-                       << " dma=" << curDma << " gif=" << curGif
+                       << " active_threads=" << eeSnapshot.threads.size();
+            if (!eeSnapshot.threads.empty())
+            {
+                const EeThreadSnapshot &thread = eeSnapshot.threads.front();
+                diagnostic << " thread_id=" << thread.id
+                           << " thread_status=" << static_cast<uint32_t>(thread.status)
+                           << " wait_reason=" << static_cast<uint32_t>(thread.waitReason)
+                           << " thread_pc=0x" << std::hex << thread.pc << std::dec;
+            }
+            diagnostic << " dma=" << curDma << " gif=" << curGif
                        << " gs_writes=" << curGs << " vif=" << curVif
                        << " frame=" << presentWidth << "x" << presentHeight;
             writePersistentDiagnostic(diagnostic.str());
