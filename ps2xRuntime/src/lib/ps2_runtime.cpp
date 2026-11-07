@@ -139,7 +139,8 @@ namespace
         bool wrapped = false;
     };
 
-    thread_local DispatchHistory g_dispatchHistory;
+    std::mutex g_dispatchHistoryMutex;
+    DispatchHistory g_dispatchHistory;
 
     bool computeFileCrc32(const std::string &path, uint32_t &crcOut)
     {
@@ -185,6 +186,7 @@ namespace
 
     void pushDispatchPc(uint32_t pc)
     {
+        std::lock_guard<std::mutex> lock(g_dispatchHistoryMutex);
         DispatchHistory &h = g_dispatchHistory;
         h.pcs[h.next] = pc;
         h.next = (h.next + 1u) % static_cast<uint32_t>(h.pcs.size());
@@ -196,6 +198,7 @@ namespace
 
     std::string formatDispatchHistory()
     {
+        std::lock_guard<std::mutex> lock(g_dispatchHistoryMutex);
         const DispatchHistory &h = g_dispatchHistory;
         const uint32_t count = h.wrapped ? static_cast<uint32_t>(h.pcs.size()) : h.next;
         if (count == 0u)
@@ -2719,11 +2722,21 @@ void PS2Runtime::run()
             const GSRegisters &gs = m_memory.gs();
             const auto eeSnapshot = m_eeScheduler->snapshot();
             std::ostringstream diagnostic;
+            const uint32_t diagnosticPc = m_debugPc.load(std::memory_order_relaxed);
+            uint32_t instructionWords[4]{};
+            const uint8_t *diagnosticRam = m_memory.getRDRAM();
+            if (diagnosticRam && diagnosticPc <= PS2_RAM_MASK - sizeof(instructionWords))
+            {
+                std::memcpy(instructionWords, diagnosticRam + (diagnosticPc & PS2_RAM_MASK), sizeof(instructionWords));
+            }
             diagnostic << "RUNTIME_TICK tick=" << tick
-                       << " pc=0x" << std::hex << m_debugPc.load(std::memory_order_relaxed)
+                       << " pc=0x" << std::hex << diagnosticPc
                        << " ra=0x" << m_debugRa.load(std::memory_order_relaxed)
                        << " sp=0x" << m_debugSp.load(std::memory_order_relaxed)
                        << " gp=0x" << m_debugGp.load(std::memory_order_relaxed)
+                       << " insn=" << instructionWords[0] << "," << instructionWords[1]
+                       << "," << instructionWords[2] << "," << instructionWords[3]
+                       << " dispatch_trace=" << formatDispatchHistory()
                        << " dispfb1=0x" << gs.dispfb1
                        << " display1=0x" << gs.display1 << std::dec
                        << " active_threads=" << eeSnapshot.threads.size()
