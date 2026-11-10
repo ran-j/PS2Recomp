@@ -163,9 +163,12 @@ namespace GSMem
         // What Resolve does for further reads of the page it just resolved: they hit, and are recorded.
         void ResolveAgain(uint32_t count) noexcept
         {
-            if (m_tracking)
-                for (uint32_t i = 0; i < count; ++i)
-                    NoteRead(m_pageBase);
+            // Resolve just noted a read of this page, so each further read only becomes the latest one.
+            if (m_tracking && count != 0u)
+            {
+                m_tagTexel += count;
+                m_track.last = {m_tagPrimitive, m_tagY, m_tagX, m_tagTexel - 1u, true};
+            }
         }
 
     private:
