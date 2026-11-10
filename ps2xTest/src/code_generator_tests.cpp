@@ -628,7 +628,7 @@ void register_code_generator_tests()
                   "unresolved JR should not pretend it has a resolved local jump table");
     });
 
-    tc.Run("unresolved JALR marks internal labels as indirect fallback resume entries", [](TestCase &t) {
+    tc.Run("unresolved JALR only marks its return pc as resumable", [](TestCase &t) {
         Function func;
         func.name = "unresolved_jalr_fallback";
         func.start = 0x3200;
@@ -647,10 +647,16 @@ void register_code_generator_tests()
         CodeGenerator gen({}, {});
         CodeGenerator::AnalysisResult analysis = gen.collectInternalBranchTargets(func, instructions);
 
-        t.IsTrue(analysis.indirectFallbackEntryPoints.contains(0x320Cu),
-                 "unresolved JALR should register internal labels as resumable entries for the owning function");
+        t.IsTrue(analysis.resumeEntryPoints.contains(0x320Cu),
+                  "unresolved JALR should register its return pc as resumable");
         t.IsTrue(analysis.entryPoints.contains(0x320Cu),
-                 "unresolved JALR fallback targets should still emit labels in the owner");
+                  "unresolved JALR return pc should emit a label in the caller");
+        t.IsFalse(analysis.indirectFallbackEntryPoints.contains(0x3200u),
+                   "unresolved JALR should not promote the caller start as an indirect jump target");
+        t.IsFalse(analysis.indirectFallbackEntryPoints.contains(0x3210u),
+                   "unresolved JALR should not promote unrelated caller instructions");
+        t.IsFalse(analysis.entryPoints.contains(0x3210u),
+                   "unresolved JALR should not emit labels for unrelated caller instructions");
         t.IsFalse(analysis.jumpTableTargets.contains(0x3204u),
                   "unresolved JALR should not pretend it has a resolved local jump table");
     });

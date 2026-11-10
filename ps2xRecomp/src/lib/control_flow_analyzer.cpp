@@ -194,7 +194,10 @@ namespace ps2recomp
             {
                 if (jrInst->function == SPECIAL_JALR)
                 {
+                    // JALR is emitted as an indirect call through the runtime dispatcher. Only its return PC can
+                    // resume in the caller; the call target is not an unresolved local jump target.
                     queueResumeEntryTarget(jrInst->address + 8u);
+                    continue;
                 }
 
                 bool foundTable = false;
