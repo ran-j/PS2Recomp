@@ -1875,11 +1875,17 @@ void EeScheduler::processDueDeadlines()
         {
             if (scheduled.event.type == EeEventType::VBlankStart)
             {
+                // A vblank that fired more than a period late (the GS or EE fell behind real
+                // time) is re-anchored to now. Chaining from the missed deadline would leave a
+                // backlog of past deadlines that fire back-to-back once the load drops, running
+                // the game faster than real time until the debt is repaid.
+                const auto now = std::chrono::steady_clock::now();
+                const auto hostBase = (now - scheduled.hostDeadline > kVBlankPeriod) ? now : scheduled.hostDeadline;
                 scheduleEvent(scheduled.deadlineCycle + kVBlankDurationCycles,
-                              scheduled.hostDeadline + kVBlankDuration,
+                              hostBase + kVBlankDuration,
                               EeEvent{EeEventType::VBlankEnd, 0, m_vsyncTick + 1u});
                 scheduleEvent(scheduled.deadlineCycle + kVBlankPeriodCycles,
-                              scheduled.hostDeadline + kVBlankPeriod,
+                              hostBase + kVBlankPeriod,
                               EeEvent{EeEventType::VBlankStart, 0, 0});
             }
             processEvent(scheduled.event);
