@@ -245,12 +245,14 @@ namespace ps2_stubs
                 o[2] = (l[0] * r[1]) - (l[1] * r[0]);
                 o[3] = 0.0f;
             };
+            // Same as sceVu0Normalize: xyz length, w cleared.
             auto normalize = [](const float (&s)[4], float (&o)[4])
             {
-                const float len = std::sqrt((s[0] * s[0]) + (s[1] * s[1]) + (s[2] * s[2]) + (s[3] * s[3]));
+                const float len = std::sqrt((s[0] * s[0]) + (s[1] * s[1]) + (s[2] * s[2]));
                 const float inv = (len > 1.0e-6f) ? (1.0f / len) : 0.0f;
-                for (int i = 0; i < 4; ++i)
+                for (int i = 0; i < 3; ++i)
                     o[i] = s[i] * inv;
+                o[3] = 0.0f;
             };
             float rawCross[4]{}, row0[4]{}, row1[4]{}, row2[4]{};
             cross(up, fwd, rawCross);
@@ -553,7 +555,8 @@ namespace ps2_stubs
         float dot = 0.0f;
         if (readVuVec4f(rdram, lhsAddr, lhs) && readVuVec4f(rdram, rhsAddr, rhs))
         {
-            dot = (lhs[0] * rhs[0]) + (lhs[1] * rhs[1]) + (lhs[2] * rhs[2]) + (lhs[3] * rhs[3]);
+            // libvu0 multiplies .xyz only, so w never contributes.
+            dot = (lhs[0] * rhs[0]) + (lhs[1] * rhs[1]) + (lhs[2] * rhs[2]);
         }
 
         if (ctx)
@@ -699,10 +702,10 @@ namespace ps2_stubs
         float m0[16]{}, m1[16]{}, out[16]{};
         if (readVuMatrix4f(rdram, m0Addr, m0) && readVuMatrix4f(rdram, m1Addr, m1))
         {
-            // out = m0 * m1 (first source . second source), matching the
-            // file's mulVuMatrix(lhs,rhs)=lhs.rhs convention and the RotMatrix
-            // / ViewScreenMatrix siblings (first operand on the left).
-            mulVuMatrix(m0, m1, out);
+            // libvu0 loads the first source into vf4-vf7 and pushes each row of the second
+            // through it (vmulax/vmadday/vmaddaz/vmaddw), so the second source is applied
+            // first: ApplyMatrix(out, v) == ApplyMatrix(m0, ApplyMatrix(m1, v)).
+            mulVuMatrix(m1, m0, out);
             (void)writeVuMatrix4f(rdram, dstAddr, out);
         }
         setReturnS32(ctx, 0);
@@ -732,11 +735,12 @@ namespace ps2_stubs
         float src[4]{}, out[4]{};
         if (readVuVec4f(rdram, srcAddr, src))
         {
-            const float len = std::sqrt((src[0] * src[0]) + (src[1] * src[1]) + (src[2] * src[2]) + (src[3] * src[3]));
+            // libvu0 takes the length of .xyz, scales .xyz only and clears w.
+            const float len = std::sqrt((src[0] * src[0]) + (src[1] * src[1]) + (src[2] * src[2]));
             if (len > 1.0e-6f)
             {
                 const float invLen = 1.0f / len;
-                for (int i = 0; i < 4; ++i)
+                for (int i = 0; i < 3; ++i)
                 {
                     out[i] = src[i] * invLen;
                 }

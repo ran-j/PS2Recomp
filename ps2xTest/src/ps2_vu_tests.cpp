@@ -296,8 +296,10 @@ void register_ps2_vu_tests()
             t.IsTrue(allMatch, "MulMatrix(dst, I, A) should equal A");
         });
 
-        tc.Run("MulMatrix_equals_arg1_times_arg2", [](TestCase &t)
+        tc.Run("MulMatrix_pushes_arg2_rows_through_arg1_like_libvu0", [](TestCase &t)
         {
+            // libvu0 loads arg1 into vf4-vf7 and transforms each row of arg2 with it:
+            // out[i] = sum_k arg2[i][k] * arg1[k].
             VuEnv env;
             float m0[16] = {
                 1, 3, 2, 4,
@@ -317,9 +319,7 @@ void register_ps2_vu_tests()
                     float sum = 0.0f;
                     for (int k = 0; k < 4; ++k)
                     {
-                        // expected = mulVuMatrix(m0, m1) = m0 * m1 (arg1 * arg2);
-                        // mulVuMatrix is file-local to VU.cpp, so mirror its formula here.
-                        sum += m1[4 * k + j] * m0[4 * i + k];
+                        sum += m1[4 * i + k] * m0[4 * k + j];
                     }
                     expected[4 * i + j] = sum;
                 }
@@ -340,7 +340,55 @@ void register_ps2_vu_tests()
                     allMatch = false;
                 }
             }
-            t.IsTrue(allMatch, "MulMatrix(dst, m0, m1) should equal m0*m1 (mulVuMatrix(m0,m1), arg1*arg2)");
+            t.IsTrue(allMatch, "MulMatrix(dst, m0, m1) should transform each row of m1 by m0, as libvu0 does");
+        });
+
+        tc.Run("MulMatrix_product_applies_second_operand_first", [](TestCase &t)
+        {
+            // Games compose screen * view * world with MulMatrix and expect
+            // ApplyMatrix(MulMatrix(A, B), v) == ApplyMatrix(A, ApplyMatrix(B, v)).
+            VuEnv env;
+            float scale[16]{};
+            makeIdentity(scale);
+            scale[0] = 2.0f; // x *= 2
+            float translate[16]{};
+            makeIdentity(translate);
+            translate[12] = 10.0f; // x += 10
+            writeMat4(env, kA, scale);
+            writeMat4(env, kB, translate);
+            SET_GPR_U32(&env.ctx, 4, kDst);
+            SET_GPR_U32(&env.ctx, 5, kA);
+            SET_GPR_U32(&env.ctx, 6, kB);
+            ps2_stubs::sceVu0MulMatrix(env.rdram.data(), &env.ctx, &env.runtime);
+
+            writeVec4(env, kC, 1.0f, 0.0f, 0.0f, 1.0f);
+            SET_GPR_U32(&env.ctx, 4, kOut);
+            SET_GPR_U32(&env.ctx, 5, kDst);
+            SET_GPR_U32(&env.ctx, 6, kC);
+            ps2_stubs::sceVu0ApplyMatrix(env.rdram.data(), &env.ctx, &env.runtime);
+            float out[4]{};
+            readVec4f(env, kOut, out);
+            t.IsTrue(nearlyEqual(out[0], 22.0f) && nearlyEqual(out[3], 1.0f),
+                     "MulMatrix(scale, translate) should translate first, then scale: (1+10)*2 = 22");
+        });
+
+        tc.Run("Normalize_and_InnerProduct_ignore_w", [](TestCase &t)
+        {
+            VuEnv env;
+            writeVec4(env, kA, 3.0f, 0.0f, 4.0f, 1.0f);
+            SET_GPR_U32(&env.ctx, 4, kDst);
+            SET_GPR_U32(&env.ctx, 5, kA);
+            ps2_stubs::sceVu0Normalize(env.rdram.data(), &env.ctx, &env.runtime);
+            float n[4]{};
+            readVec4f(env, kDst, n);
+            t.IsTrue(nearlyEqual(n[0], 0.6f) && nearlyEqual(n[1], 0.0f) && nearlyEqual(n[2], 0.8f) && nearlyEqual(n[3], 0.0f),
+                     "Normalize should use the xyz length and clear w");
+
+            writeVec4(env, kB, 1.0f, 2.0f, 3.0f, 5.0f);
+            SET_GPR_U32(&env.ctx, 4, kA);
+            SET_GPR_U32(&env.ctx, 5, kB);
+            ps2_stubs::sceVu0InnerProduct(env.rdram.data(), &env.ctx, &env.runtime);
+            t.IsTrue(nearlyEqual(env.ctx.f[0], 15.0f), "InnerProduct should sum xyz products only");
         });
 
         tc.Run("RotMatrix_Z_matches_RotMatrixZ", [](TestCase &t)
