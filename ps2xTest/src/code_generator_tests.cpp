@@ -661,6 +661,35 @@ void register_code_generator_tests()
                   "unresolved JALR should not pretend it has a resolved local jump table");
     });
 
+    tc.Run("unresolved JALR without a link register retains indirect fallback", [](TestCase &t) {
+        Function func;
+        func.name = "unresolved_jalr_tail_jump";
+        func.start = 0x3300;
+        func.end = 0x3320;
+        func.isRecompiled = true;
+        func.isStub = false;
+
+        std::vector<Instruction> instructions{
+            makeNop(0x3300),
+            makeJalr(0x3304, 25, 0),
+            makeNop(0x3308),
+            makeNop(0x330C),
+            makeNop(0x3310),
+        };
+
+        CodeGenerator gen({}, {});
+        CodeGenerator::AnalysisResult analysis = gen.collectInternalBranchTargets(func, instructions);
+
+        t.IsFalse(analysis.resumeEntryPoints.contains(0x330Cu),
+                  "JALR without a link register should not add a return resume entry");
+        t.IsTrue(analysis.indirectFallbackEntryPoints.contains(0x330Cu),
+                 "JALR without a link register should retain unresolved indirect-jump fallback");
+        t.IsTrue(analysis.entryPoints.contains(0x3310u),
+                 "JALR without a link register should retain fallback labels in the owner");
+        t.IsFalse(analysis.jumpTableTargets.contains(0x3304u),
+                  "unresolved JALR without a link register should not fabricate a jump table");
+    });
+
     tc.Run("syscall marks the following instruction as a resume entry", [](TestCase &t) {
         // Shape of a real SDK syscall wrapper:
         //   addiu $v1, $zero, <num> ; syscall ; jr $ra ; <delay slot>
