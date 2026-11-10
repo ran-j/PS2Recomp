@@ -1168,6 +1168,8 @@ void GSCpuBackend::QueuePrimitive(const GSPrimitiveBatch &batch)
     m_pendingClutIndex.push_back(clutIndex);
     m_pending.push_back(batch);
     const PixelBounds bounds = primitiveBounds(batch);
+    // A row of slack on each side: bands only use this to skip primitives that cannot reach them.
+    m_pendingRows.push_back(bounds.empty() ? RowRange{0, -1} : RowRange{bounds.y0 - 1, bounds.y1 + 1});
     addRowWeights(m_pendingRowWeights, bounds);
     m_pendingPixels += bounds.area();
     if (m_pending.size() >= kMaxPendingPrimitives || m_pendingPixels >= kMaxPendingPixels)
@@ -1179,6 +1181,7 @@ void GSCpuBackend::ClearPendingUnlocked()
     m_pending.clear();
     m_pendingCluts.clear();
     m_pendingClutIndex.clear();
+    m_pendingRows.clear();
     m_pendingClutGeneration = UINT64_MAX;
     m_pendingClutReadIndex = 0u;
     m_pendingWritePages.reset();
@@ -1300,6 +1303,9 @@ void GSCpuBackend::RasterizeTrackedInParallel()
             raster.primitive = static_cast<uint32_t>(i);
             const int32_t clutIndex = m_pendingClutIndex[i];
             raster.clut = clutIndex >= 0 ? m_pendingCluts[static_cast<size_t>(clutIndex)].data() : nullptr;
+            // Most primitives miss a given band; skipping them here avoids each one's setup per band.
+            if (m_pendingRows[i].end < raster.rowBegin || m_pendingRows[i].begin >= raster.rowEnd)
+                continue;
             DrawPrimitiveRows(m_pending[i], raster);
         }
     };
@@ -1417,6 +1423,9 @@ void GSCpuBackend::RasterizePendingInParallel()
             raster.primitive = static_cast<uint32_t>(i);
             const int32_t clutIndex = m_pendingClutIndex[i];
             raster.clut = clutIndex >= 0 ? m_pendingCluts[static_cast<size_t>(clutIndex)].data() : nullptr;
+            // Most primitives miss a given band; skipping them here avoids each one's setup per band.
+            if (m_pendingRows[i].end < raster.rowBegin || m_pendingRows[i].begin >= raster.rowEnd)
+                continue;
             DrawPrimitiveRows(m_pending[i], raster);
         }
     };

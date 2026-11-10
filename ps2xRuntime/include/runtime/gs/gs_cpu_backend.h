@@ -315,6 +315,8 @@ private:
     // Indexed textures keep the palette they were queued with: CLUT loads run immediately.
     std::vector<std::array<uint32_t, 256>> m_pendingCluts;
     std::vector<int32_t> m_pendingClutIndex;
+    // Rows each queued primitive can draw (inclusive, padded), so bands skip the others cheaply.
+    std::vector<RowRange> m_pendingRows;
     uint64_t m_pendingClutGeneration = UINT64_MAX;
     uint64_t m_pendingClutKey = 0;
     // First queued primitive after the latest CLUT load; earlier samples no longer decide the cached page.
