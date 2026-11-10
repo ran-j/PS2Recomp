@@ -3274,6 +3274,92 @@ void register_ps2_gs_tests()
             t.IsTrue(serial == render(4u, true), "a GS thread must leave VRAM and the texture buffer as serially");
         });
 
+        tc.Run("GS batched perspective triangles draw the same as serially, including slivers and off-screen vertices", [](TestCase &t)
+        {
+            // Batched triangles take the chunked path with per-row column bounds; drawn one by one they take the
+            // per-pixel path. Thin slivers and vertices far outside the scissor stress the column bounds,
+            // filtered STQ sampling, shading, fog and depth the chunked stages.
+            auto render = [](uint32_t threads)
+            {
+                std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+                uint32_t seed = 0x2468ACEu;
+                auto next = [&seed]()
+                {
+                    seed = seed * 1664525u + 1013904223u;
+                    return seed >> 8u;
+                };
+                for (uint8_t &byte : vram)
+                    byte = static_cast<uint8_t>(next());
+
+                GSCpuBackend gs;
+                gs.Initialize(vram.data(), static_cast<uint32_t>(vram.size()));
+                gs.SetRasterThreads(threads);
+                for (int i = 0; i < 400; ++i)
+                {
+                    GSPrimitiveBatch batch{};
+                    GSDrawState &state = batch.state;
+                    auto &ctx = state.context;
+                    ctx.frame.fbp = 0u;
+                    ctx.frame.fbw = 10u;
+                    ctx.frame.psm = GS_PSM_CT32;
+                    ctx.zbuf.zbp = 160u;
+                    ctx.zbuf.psm = GS_PSM_Z16S;
+                    ctx.scissor = {0u, 639u, 0u, 447u};
+                    ctx.xyoffset.ofx = 2048u << 4u;
+                    ctx.xyoffset.ofy = 2048u << 4u;
+                    ctx.test = (static_cast<uint64_t>(1u + next() % 3u) << 17u) | (1ull << 16u);
+                    ctx.alpha = 0x80ull << 32u | 0x44u;
+                    ctx.clamp = next() % 2u;
+                    ctx.tex0.tbp0 = 11000u;
+                    ctx.tex0.tbw = 2u;
+                    ctx.tex0.psm = GS_PSM_CT32;
+                    ctx.tex0.tcc = 1u;
+                    ctx.tex0.tfx = static_cast<uint8_t>(next() % 4u);
+                    state.textureWidth = 128u;
+                    state.textureHeight = 128u;
+                    state.linearFilter = (next() % 2u) != 0u;
+                    state.prim.type = GS_PRIM_TRIANGLE;
+                    state.prim.tme = true;
+                    state.prim.fst = (next() % 4u) == 0u;
+                    state.prim.iip = (next() % 2u) != 0u;
+                    state.prim.abe = (next() % 2u) != 0u;
+                    state.prim.fge = (next() % 3u) == 0u;
+                    batch.vertexCount = 3u;
+                    const bool sliver = (next() % 4u) == 0u;
+                    for (int v = 0; v < 3; ++v)
+                    {
+                        GSVertex &vertex = batch.vertices[static_cast<size_t>(v)];
+                        // Mostly on screen, sometimes hundreds of pixels outside it.
+                        const float spread = (next() % 5u) == 0u ? 1600.0f : 700.0f;
+                        vertex.x = 2048.0f - 200.0f + static_cast<float>(next() % 1000u) / 1000.0f * spread + static_cast<float>(next() % 16u) / 16.0f;
+                        vertex.y = 2048.0f - 150.0f + static_cast<float>(next() % 1000u) / 1000.0f * spread * 0.7f;
+                        if (sliver && v == 2)
+                        {
+                            vertex.x = batch.vertices[0].x + static_cast<float>(next() % 3u) * 0.37f;
+                            vertex.y = batch.vertices[1].y + 0.5f;
+                        }
+                        vertex.z = static_cast<double>(next() % 0xFFFFu);
+                        vertex.r = static_cast<uint8_t>(next());
+                        vertex.g = static_cast<uint8_t>(next());
+                        vertex.b = static_cast<uint8_t>(next());
+                        vertex.a = static_cast<uint8_t>(next());
+                        vertex.fog = static_cast<uint8_t>(next());
+                        vertex.q = 0.5f + static_cast<float>(next() % 1000u) / 500.0f;
+                        vertex.s = static_cast<float>(next() % 1000u) / 500.0f * vertex.q;
+                        vertex.t = static_cast<float>(next() % 1000u) / 500.0f * vertex.q;
+                        vertex.u = static_cast<uint16_t>(next() % (128u * 16u));
+                        vertex.v = static_cast<uint16_t>(next() % (128u * 16u));
+                    }
+                    gs.Submit(batch);
+                }
+                gs.Flush();
+                return vram;
+            };
+
+            const std::vector<uint8_t> serial = render(1u);
+            t.IsTrue(serial == render(4u), "batched triangles must draw exactly what serial drawing does");
+        });
+
         tc.Run("GS runs of self-sampling RGB24 primitives batched together draw the same in parallel", [](TestCase &t)
         {
             // Runs of overlapping T8H/T4HL/T4HH sprites and triangles that sample the top byte of the RGB24

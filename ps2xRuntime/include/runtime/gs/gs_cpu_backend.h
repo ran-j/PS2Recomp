@@ -172,6 +172,8 @@ private:
         std::vector<UndoEntry> *undo = nullptr;
         const std::bitset<512> *undoPages = nullptr;
         RasterStats *stats = nullptr;
+        // Set for a band of a queued batch, whose primitives never sample memory the batch writes.
+        bool batched = false;
 
         bool ownsRow(int y) const
         {

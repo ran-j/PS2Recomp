@@ -1279,6 +1279,7 @@ void GSCpuBackend::RasterizeTrackedInParallel()
         raster.rowEnd = rows[index].end;
         raster.cache = &caches[index];
         raster.trackReads = true;
+        raster.batched = true;
         raster.undo = &m_undoLogs[index];
         raster.undoPages = &kept;
         raster.stats = bandStats.empty() ? nullptr : &bandStats[index];
@@ -1397,6 +1398,7 @@ void GSCpuBackend::RasterizePendingInParallel()
         raster.rowEnd = rows[index].end;
         raster.cache = &caches[index];
         raster.trace = &traces[index];
+        raster.batched = true;
         raster.stats = bandStats.empty() ? nullptr : &bandStats[index];
         for (size_t i = 0; i < m_pending.size(); ++i)
         {
@@ -2980,12 +2982,167 @@ void GSCpuBackend::DrawTriangle(const GSPrimitiveBatch &batch, const RasterConte
     const float invAbsDenom = 1.0f / std::fabs(denom);
     constexpr float kEdgeEpsilon = 1.0e-4f;
 
+    // Each weight is linear in px along a row. Solving the three edge tests in double, widened by more than
+    // the float evaluation can be off, bounds the columns worth testing; the exact per-pixel test below still
+    // decides coverage, so the drawn pixels are unchanged while most of the bounding box is skipped.
+    struct EdgeBound
+    {
+        double a = 0.0;   // weight change per pixel
+        double b = 0.0;   // weight at px = 0 for the current row
+        double err = 0.0; // bound on the float evaluation error of the weight
+    };
+    const double scale = static_cast<double>(winding) * static_cast<double>(invAbsDenom);
+    const double extentX = static_cast<double>(std::max(std::fabs(static_cast<double>(minX) - fx2), std::fabs(static_cast<double>(maxX) + 1.0 - fx2)));
+    auto rowEdge = [&](double A, double B, double py) -> EdgeBound
+    {
+        const double C = B * (py - fy2);
+        EdgeBound edge;
+        edge.a = A * scale;
+        edge.b = (C - A * fx2) * scale;
+        edge.err = (std::fabs(A) * extentX + std::fabs(C) + 1.0) * 1.0e-6 * std::fabs(scale) + 1.0e-6;
+        return edge;
+    };
+    // Narrows [lo, hi] to the columns where a*px + b >= -eps could hold, px = x + 0.5.
+    auto clipToEdge = [&](const EdgeBound &edge, int &lo, int &hi)
+    {
+        const double threshold = -static_cast<double>(kEdgeEpsilon) - edge.err - edge.b;
+        if (std::fabs(edge.a) < 1.0e-12)
+        {
+            if (threshold > 0.0)
+                hi = lo - 1;
+            return;
+        }
+        const double boundary = threshold / edge.a - 0.5;
+        if (!(std::fabs(boundary) < 1.0e9))
+        {
+            // Beyond any column: the whole row is on one side of this edge.
+            if ((edge.a > 0.0) == (boundary > 0.0))
+                hi = lo - 1;
+            return;
+        }
+        const double margin = 2.0;
+        if (edge.a > 0.0)
+            lo = std::max(lo, static_cast<int>(std::floor(boundary - margin)));
+        else
+            hi = std::min(hi, static_cast<int>(std::ceil(boundary + margin)));
+    };
+
     uint64_t insidePixels = 0u;
     uint64_t writtenPixels = 0u;
+    uint64_t testedPixels = 0u;
     for (int y = raster.firstRow(minY); y <= raster.lastRow(maxY); ++y)
     {
         float py = static_cast<float>(y) + 0.5f;
-        for (int x = minX; x <= maxX; ++x)
+        int spanX0 = minX;
+        int spanX1 = maxX;
+        {
+            const double pyd = static_cast<double>(py);
+            const EdgeBound e0 = rowEdge(static_cast<double>(fy1 - fy2), static_cast<double>(fx2 - fx1), pyd);
+            const EdgeBound e1 = rowEdge(static_cast<double>(fy2 - fy0), static_cast<double>(fx0 - fx2), pyd);
+            EdgeBound e2;
+            e2.a = -(e0.a + e1.a);
+            e2.b = 1.0 - e0.b - e1.b;
+            e2.err = e0.err + e1.err + 1.0e-6;
+            clipToEdge(e0, spanX0, spanX1);
+            clipToEdge(e1, spanX0, spanX1);
+            clipToEdge(e2, spanX0, spanX1);
+        }
+        if (spanX0 > spanX1)
+            continue;
+        testedPixels += static_cast<uint64_t>(spanX1 - spanX0 + 1);
+        if (raster.batched && state.prim.tme)
+        {
+            // Pixel by pixel, every texel waits on its own interpolation, division and fetch, and the write
+            // waits on the texel: one long dependency chain per pixel. Running each stage over a chunk of the
+            // row lets independent pixels overlap. Batched primitives never sample anything their batch's
+            // writes change, so sampling a chunk before writing it reads the same texels, in the same order.
+            constexpr int kChunk = 32;
+            int xs[kChunk];
+            float w0s[kChunk];
+            float w1s[kChunk];
+            float w2s[kChunk];
+            uint32_t texels[kChunk];
+            TextureAxis axesU[kChunk];
+            TextureAxis axesV[kChunk];
+            for (int chunkX = spanX0; chunkX <= spanX1; chunkX += kChunk)
+            {
+                const int chunkEnd = std::min(spanX1, chunkX + kChunk - 1);
+                int count = 0;
+                for (int x = chunkX; x <= chunkEnd; ++x)
+                {
+                    float px = static_cast<float>(x) + 0.5f;
+                    float w0 = (((fy1 - fy2) * (px - fx2) + (fx2 - fx1) * (py - fy2)) * winding) * invAbsDenom;
+                    float w1 = (((fy2 - fy0) * (px - fx2) + (fx0 - fx2) * (py - fy2)) * winding) * invAbsDenom;
+                    float w2 = 1.0f - w0 - w1;
+                    xs[count] = x;
+                    w0s[count] = w0;
+                    w1s[count] = w1;
+                    w2s[count] = w2;
+                    count += (w0 < -kEdgeEpsilon || w1 < -kEdgeEpsilon || w2 < -kEdgeEpsilon) ? 0 : 1;
+                }
+                insidePixels += static_cast<uint64_t>(count);
+                // Texel coordinates exactly as SampleTexture derives them.
+                const float texWf = static_cast<float>(sampler.texW);
+                const float texHf = static_cast<float>(sampler.texH);
+                for (int i = 0; i < count; ++i)
+                {
+                    const float w0 = w0s[i], w1 = w1s[i], w2 = w2s[i];
+                    float texUf, texVf;
+                    if (state.prim.fst)
+                    {
+                        const uint16_t iu = static_cast<uint16_t>(v0.u * w0 + v1.u * w1 + v2.u * w2);
+                        const uint16_t iv = static_cast<uint16_t>(v0.v * w0 + v1.v * w1 + v2.v * w2);
+                        texUf = static_cast<float>(iu) / 16.0f;
+                        texVf = static_cast<float>(iv) / 16.0f;
+                    }
+                    else
+                    {
+                        const float is = v0.s * w0 + v1.s * w1 + v2.s * w2;
+                        const float it = v0.t * w0 + v1.t * w1 + v2.t * w2;
+                        const float iq = v0.q * w0 + v1.q * w1 + v2.q * w2;
+                        const float invQ = 1.0f / fabsQ(iq);
+                        texUf = is * invQ * texWf;
+                        texVf = it * invQ * texHf;
+                    }
+                    axesU[i] = PrepareTextureAxis(texUf, sampler.texW, sampler.wrapU, sampler.minU, sampler.maxU, sampler.linear);
+                    axesV[i] = PrepareTextureAxis(texVf, sampler.texH, sampler.wrapV, sampler.minV, sampler.maxV, sampler.linear);
+                }
+                for (int i = 0; i < count; ++i)
+                {
+                    raster.beginSample(y, xs[i]);
+                    texels[i] = SampleTextureAxes(sampler, axesU[i], axesV[i]);
+                    raster.sampled(y, xs[i]);
+                }
+                for (int i = 0; i < count; ++i)
+                {
+                    const float w0 = w0s[i], w1 = w1s[i], w2 = w2s[i];
+                    const double z = v0.z * w0 + v1.z * w1 + v2.z * w2;
+                    uint8_t r, g, b, a;
+                    if (state.prim.iip)
+                    {
+                        r = clampU8(static_cast<int>(v0.r * w0 + v1.r * w1 + v2.r * w2));
+                        g = clampU8(static_cast<int>(v0.g * w0 + v1.g * w1 + v2.g * w2));
+                        b = clampU8(static_cast<int>(v0.b * w0 + v1.b * w1 + v2.b * w2));
+                        a = clampU8(static_cast<int>(v0.a * w0 + v1.a * w1 + v2.a * w2));
+                    }
+                    else
+                    {
+                        r = v2.r;
+                        g = v2.g;
+                        b = v2.b;
+                        a = v2.a;
+                    }
+                    const uint32_t texel = texels[i];
+                    const TextureCombineResult color = combineTexture(ctx.tex0, r, g, b, a,
+                                                                      static_cast<uint8_t>(texel & 0xFF), static_cast<uint8_t>((texel >> 8) & 0xFF),
+                                                                      static_cast<uint8_t>((texel >> 16) & 0xFF), static_cast<uint8_t>((texel >> 24) & 0xFF));
+                    const uint8_t fog = clampU8(static_cast<int>(v0.fog * w0 + v1.fog * w1 + v2.fog * w2));
+                    writtenPixels += WritePixel(pipe, xs[i], y, static_cast<u32>(z + 0.5), color.r, color.g, color.b, color.a, fog) ? 1u : 0u;
+                }
+            }
+            continue;
+        }
+        for (int x = spanX0; x <= spanX1; ++x)
         {
             float px = static_cast<float>(x) + 0.5f;
 
@@ -3067,8 +3224,8 @@ void GSCpuBackend::DrawTriangle(const GSPrimitiveBatch &batch, const RasterConte
     }
     if (raster.stats)
     {
-        const int rows = raster.lastRow(maxY) - raster.firstRow(minY) + 1;
-        const uint64_t box = static_cast<uint64_t>(rows) * static_cast<uint64_t>(maxX - minX + 1);
+        // Pixels the edge test ran on, after the per-row column bounds.
+        const uint64_t box = testedPixels;
         raster.stats->boxPixels += box;
         raster.stats->insidePixels += insidePixels;
         raster.stats->writtenPixels += writtenPixels;
