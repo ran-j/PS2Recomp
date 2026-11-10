@@ -126,6 +126,37 @@ private:
         uint32_t offset = 0;
         uint32_t old = 0;
     };
+    // PS2X_GS_STATS counters a rasterizer pass keeps locally and adds to the totals once it ends.
+    struct RasterStats
+    {
+        uint64_t boxPixels = 0;
+        uint64_t insidePixels = 0;
+        uint64_t writtenPixels = 0;
+        uint64_t texSamples = 0;
+        // Triangles whose clipped bounding box is at least 64K pixels.
+        uint64_t bigBoxPixels = 0;
+        uint64_t bigInsidePixels = 0;
+    };
+    static void AddRasterStats(const RasterStats &stats);
+    // Why queued primitives were rasterized; indexes the PS2X_GS_STATS flush counters.
+    enum class FlushReason : uint8_t
+    {
+        Full,
+        TargetChange,
+        TargetOverlap,
+        ReadsPendingWrites,
+        WritesPendingReads,
+        TrackMismatch,
+        DrawAlone,
+        Clut,
+        Transfer,
+        TextureFlush,
+        Capture,
+        Idle,
+        Readback,
+        Other,
+        Count,
+    };
     struct RasterContext
     {
         int rowBegin = std::numeric_limits<int>::min();
@@ -140,6 +171,7 @@ private:
         // Where a tracked batch logs what it overwrites in undoPages, so a cached copy can be rebuilt.
         std::vector<UndoEntry> *undo = nullptr;
         const std::bitset<512> *undoPages = nullptr;
+        RasterStats *stats = nullptr;
 
         bool ownsRow(int y) const
         {
@@ -184,7 +216,7 @@ private:
     void DrawPrimitiveRows(const GSPrimitiveBatch &batch, const RasterContext &raster);
     void PrepareTexturePageCache(const GSDrawState &state);
     void QueuePrimitive(const GSPrimitiveBatch &batch);
-    void FlushPendingUnlocked();
+    void FlushPendingUnlocked(FlushReason reason = FlushReason::Other);
     void RasterizePendingInParallel();
     void RasterizeTrackedInParallel();
     void ClearPendingUnlocked();
@@ -206,7 +238,8 @@ private:
     static PixelPipeline MakePixelPipeline(const GSDrawState &state, const RasterContext &raster);
     void RecordUndo(const PixelPipeline &pipe, const uint8_t *pixel, int x, int y);
     void WritePixel(const GSDrawState &state, int x, int y, int z, uint8_t r, uint8_t g, uint8_t b, uint8_t a, uint8_t fog);
-    void WritePixel(const PixelPipeline &pipe, int x, int y, int z, uint8_t r, uint8_t g, uint8_t b, uint8_t a, uint8_t fog);
+    // True when the pixel passed every test and something was stored.
+    bool WritePixel(const PixelPipeline &pipe, int x, int y, int z, uint8_t r, uint8_t g, uint8_t b, uint8_t a, uint8_t fog);
     // Texture registers decoded once per primitive, with the CLUT expanded to RGBA for indexed formats.
     struct TextureSampler
     {
