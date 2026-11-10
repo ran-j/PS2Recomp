@@ -192,9 +192,12 @@ namespace ps2recomp
             bool needsIndirectFallback = false;
             for (const Instruction *jrInst : indirectJumps)
             {
-                if (jrInst->function == SPECIAL_JALR)
+                if (jrInst->function == SPECIAL_JALR && jrInst->rd != 0u)
                 {
+                    // A link-producing JALR is emitted as an indirect call through the runtime dispatcher. Only its
+                    // return PC can resume in the caller; JALR $zero remains an unresolved indirect jump below.
                     queueResumeEntryTarget(jrInst->address + 8u);
+                    continue;
                 }
 
                 bool foundTable = false;
