@@ -156,6 +156,107 @@ static bool writeMinimalMipsElfWithJalFallbackTarget(const std::filesystem::path
     return writer.save(elfPath.string());
 }
 
+static bool writeMinimalMipsElfWithSwitchJumpTables(const std::filesystem::path &elfPath)
+{
+    ELFIO::elfio writer;
+    writer.create(ELFIO::ELFCLASS32, ELFIO::ELFDATA2LSB);
+    writer.set_os_abi(ELFIO::ELFOSABI_NONE);
+    writer.set_type(ELFIO::ET_EXEC);
+    writer.set_machine(ELFIO::EM_MIPS);
+    writer.set_entry(0x00100000u);
+
+    ELFIO::section *text = writer.sections.add(".text");
+    text->set_type(ELFIO::SHT_PROGBITS);
+    text->set_flags(ELFIO::SHF_ALLOC | ELFIO::SHF_EXECINSTR);
+    text->set_addr_align(4);
+    text->set_address(0x00100000u);
+
+    std::array<uint32_t, 64> textWords{};
+    textWords[0] = 0x0C040008u; // jal 0x00100020 (switch with lui/addiu base)
+    textWords[2] = 0x0C040020u; // jal 0x00100080 (switch with offset folded into lw)
+    textWords[4] = 0x03E00008u; // jr ra
+
+    // Function at 0x00100020 whose table repeats its epilogue label, which
+    // on its own looks exactly like a leaf function entry.
+    textWords[8] = 0x27BDFFF0u;  // addiu sp,sp,-0x10
+    textWords[9] = 0xFFBF0000u;  // sd ra,0(sp)
+    textWords[10] = 0x3C0E0020u; // lui t6,0x20
+    textWords[11] = 0x00047880u; // sll t7,a0,2
+    textWords[12] = 0x25CE0010u; // addiu t6,t6,0x10 (table at 0x00200010)
+    textWords[13] = 0x01EE7821u; // addu t7,t7,t6
+    textWords[14] = 0x8DEF0000u; // lw t7,0(t7)
+    textWords[15] = 0x01E00008u; // jr t7
+    textWords[17] = 0x24020001u; // case 0x00100044: addiu v0,zero,1
+    textWords[18] = 0x24020002u; // case 0x00100048: addiu v0,zero,2
+    textWords[19] = 0xDFBF0000u; // ld ra,0(sp)
+    textWords[20] = 0x03E00008u; // case 0x00100050 (epilogue): jr ra
+    textWords[21] = 0x27BD0010u; // addiu sp,sp,0x10 (delay slot)
+    textWords[22] = 0x24020003u; // case 0x00100058: addiu v0,zero,3
+    textWords[23] = 0x1000FFFBu; // b 0x0010004C
+
+    // Function at 0x00100080 addressing its table as lw t7,0x40(base).
+    textWords[32] = 0x3C0E0020u; // lui t6,0x20
+    textWords[33] = 0x00047880u; // sll t7,a0,2
+    textWords[34] = 0x01CF7821u; // addu t7,t6,t7
+    textWords[35] = 0x8DEF0040u; // lw t7,0x40(t7) (table at 0x00200040)
+    textWords[36] = 0x01E00008u; // jr t7
+    textWords[38] = 0x03E00008u; // case 0x00100098 (epilogue): jr ra
+    textWords[40] = 0x24020005u; // case 0x001000A0: addiu v0,zero,5
+    textWords[41] = 0x03E00008u; // jr ra
+
+    // Callbacks reachable only through the pointer table after the first switch table.
+    textWords[48] = 0x27BDFFF0u; // 0x001000C0: addiu sp,sp,-0x10
+    textWords[49] = 0xFFBF0000u; // sd ra,0(sp)
+    textWords[50] = 0xDFBF0000u; // ld ra,0(sp)
+    textWords[51] = 0x03E00008u; // jr ra
+    textWords[52] = 0x27BD0010u; // addiu sp,sp,0x10
+    textWords[56] = 0x27BDFFF0u; // 0x001000E0: addiu sp,sp,-0x10
+    textWords[57] = 0xFFBF0000u; // sd ra,0(sp)
+    textWords[58] = 0xDFBF0000u; // ld ra,0(sp)
+    textWords[59] = 0x03E00008u; // jr ra
+    textWords[60] = 0x27BD0010u; // addiu sp,sp,0x10
+
+    text->set_data(reinterpret_cast<const char *>(textWords.data()),
+                   static_cast<ELFIO::Elf_Word>(textWords.size() * sizeof(uint32_t)));
+
+    ELFIO::section *rodata = writer.sections.add(".rodata");
+    rodata->set_type(ELFIO::SHT_PROGBITS);
+    rodata->set_flags(ELFIO::SHF_ALLOC);
+    rodata->set_addr_align(4);
+    rodata->set_address(0x00200000u);
+
+    std::array<uint32_t, 24> rodataWords{};
+    rodataWords[4] = 0x00100044u; // switch table at 0x00200010
+    rodataWords[5] = 0x00100048u;
+    rodataWords[6] = 0x00100058u;
+    rodataWords[7] = 0x00100050u;
+    rodataWords[8] = 0x00100050u;
+    rodataWords[9] = 0x00100050u;
+    rodataWords[10] = 0x00100050u;
+    rodataWords[11] = 0x001000C0u; // callback table directly after it
+    rodataWords[12] = 0x001000E0u;
+    rodataWords[16] = 0x001000A0u; // switch table at 0x00200040
+    rodataWords[17] = 0x00100098u;
+    rodataWords[18] = 0x00100098u;
+    rodataWords[19] = 0x00100098u;
+    rodata->set_data(reinterpret_cast<const char *>(rodataWords.data()),
+                     static_cast<ELFIO::Elf_Word>(rodataWords.size() * sizeof(uint32_t)));
+
+    ELFIO::segment *textSegment = writer.segments.add();
+    textSegment->set_type(ELFIO::PT_LOAD);
+    textSegment->set_flags(ELFIO::PF_R | ELFIO::PF_X);
+    textSegment->set_align(0x1000);
+    textSegment->add_section_index(text->get_index(), text->get_addr_align());
+
+    ELFIO::segment *rodataSegment = writer.segments.add();
+    rodataSegment->set_type(ELFIO::PT_LOAD);
+    rodataSegment->set_flags(ELFIO::PF_R);
+    rodataSegment->set_align(0x1000);
+    rodataSegment->add_section_index(rodata->get_index(), rodata->get_addr_align());
+
+    return writer.save(elfPath.string());
+}
+
 static bool writeMinimalMipsElfWithVuMicroprogramSection(const std::filesystem::path &elfPath)
 {
     ELFIO::elfio writer;
@@ -1761,6 +1862,73 @@ void register_ps2_recompiler_tests()
                       "a data pointer must not split a function at a control-transfer delay slot");
             t.IsFalse(hasStart(0x00100300u),
                       "an isolated data pointer or non-callback code materialization must not become a function");
+
+            std::error_code removeError;
+            std::filesystem::remove(elfPath, removeError);
+        });
+
+        tc.Run("elf parser keeps switch jump table labels inside their function", [](TestCase &t) {
+            const auto uniqueSuffix = std::to_string(
+                static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count()));
+            const std::filesystem::path elfPath =
+                std::filesystem::temp_directory_path() / ("ps2recomp-switch-table-" + uniqueSuffix + ".elf");
+
+            const bool writeOk = writeMinimalMipsElfWithSwitchJumpTables(elfPath);
+            t.IsTrue(writeOk, "temporary stripped ELF should be generated");
+            if (!writeOk)
+            {
+                return;
+            }
+
+            ElfParser parser(elfPath.string());
+            const bool parseOk = parser.parse();
+            t.IsTrue(parseOk, "generated ELF should parse");
+            if (parseOk)
+            {
+                const auto functions = parser.extractFunctions();
+                auto findStart = [&functions](uint32_t start)
+                {
+                    return std::find_if(functions.begin(), functions.end(),
+                                        [start](const Function &function)
+                                        { return function.start == start; });
+                };
+                auto containsAll = [](const Function &function, std::initializer_list<uint32_t> targets)
+                {
+                    return std::all_of(targets.begin(), targets.end(), [&function](uint32_t target)
+                                       { return target >= function.start && target < function.end; });
+                };
+
+                const auto addiuSwitch = findStart(0x00100020u);
+                t.IsTrue(addiuSwitch != functions.end(), "the lui/addiu switch function should be discovered");
+                if (addiuSwitch != functions.end())
+                {
+                    t.IsTrue(containsAll(*addiuSwitch, {0x00100044u, 0x00100048u, 0x00100050u, 0x00100058u}),
+                             "every case label of the lui/addiu switch should stay inside its function");
+                }
+                for (uint32_t label : {0x00100044u, 0x00100048u, 0x00100050u, 0x00100058u})
+                {
+                    t.IsTrue(findStart(label) == functions.end(),
+                             "a lui/addiu switch case label must not become a function start");
+                }
+
+                const auto foldedSwitch = findStart(0x00100080u);
+                t.IsTrue(foldedSwitch != functions.end(), "the folded-offset switch function should be discovered");
+                if (foldedSwitch != functions.end())
+                {
+                    t.IsTrue(containsAll(*foldedSwitch, {0x00100098u, 0x001000A0u}),
+                             "every case label of the folded-offset switch should stay inside its function");
+                }
+                for (uint32_t label : {0x00100098u, 0x001000A0u})
+                {
+                    t.IsTrue(findStart(label) == functions.end(),
+                             "a folded-offset switch case label must not become a function start");
+                }
+
+                t.IsTrue(findStart(0x001000C0u) != functions.end(),
+                         "a callback table right after a switch table should still discover its first entry");
+                t.IsTrue(findStart(0x001000E0u) != functions.end(),
+                         "a callback table right after a switch table should still discover its second entry");
+            }
 
             std::error_code removeError;
             std::filesystem::remove(elfPath, removeError);

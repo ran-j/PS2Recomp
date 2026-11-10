@@ -4,6 +4,7 @@
 #include "ps2recomp/types.h"
 #include <iostream>
 #include <stdexcept>
+#include <unordered_map>
 #include <unordered_set>
 #define NOMINMAX
 
@@ -1405,7 +1406,193 @@ namespace
         return name == ".ctors" || name == ".dtors" || name == ".init_array" || name == ".fini_array";
     }
 
-    void ScanDataFunctionPointerTables(const std::vector<ps2recomp::Section> &sections, std::unordered_set<uint32_t> &starts)
+    // Code range a switch jump table may dispatch into, keyed by table address.
+    using SwitchJumpTables = std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>>;
+
+    // A C switch compiles to `lw rt, off(base + (index << 2)); jr rt` with the
+    // table in .rodata.  Its entries are case labels inside the dispatching
+    // function, and an epilogue label (`jr ra; addiu sp,sp,N`) passes the leaf
+    // entry probe, so reading the table as function pointers would split the
+    // function at its own case label.  This mirrors the dispatch shape the
+    // control-flow analyzer resolves, so both passes agree on what a table is.
+    SwitchJumpTables CollectSwitchJumpTables(const std::vector<ps2recomp::Section> &sections,
+                                             const std::unordered_set<uint32_t> &knownStarts)
+    {
+        constexpr uint32_t kLoadLookbackWords = 20;
+        constexpr uint32_t kAddLookbackWords = 10;
+        constexpr uint32_t kUpperLookbackWords = 20;
+
+        SwitchJumpTables tables;
+        for (const auto &section : sections)
+        {
+            if (!section.isCode || !section.data || section.size < MIPS_INSTRUCTION_SIZE)
+            {
+                continue;
+            }
+
+            // A switch only dispatches within its own function; known call
+            // targets bound that function, so a neighbouring pointer table that
+            // happens to follow the jump table is not swallowed by it.
+            std::vector<uint32_t> boundaries;
+            for (uint32_t start : knownStarts)
+            {
+                if (start >= section.address && start - section.address < section.size)
+                {
+                    boundaries.push_back(start);
+                }
+            }
+            std::sort(boundaries.begin(), boundaries.end());
+
+            const auto wordAt = [&](uint32_t index)
+            {
+                uint32_t raw = 0;
+                ReadSectionWord(section, index * MIPS_INSTRUCTION_SIZE, raw);
+                return raw;
+            };
+            const auto lookbackBegin = [](uint32_t index, uint32_t words)
+            {
+                return index > words ? index - words : 0u;
+            };
+
+            const uint32_t wordCount = section.size / MIPS_INSTRUCTION_SIZE;
+            for (uint32_t jrIndex = 1; jrIndex < wordCount; ++jrIndex)
+            {
+                const uint32_t jrRaw = wordAt(jrIndex);
+                if (OPCODE(jrRaw) != OPCODE_SPECIAL || FUNCTION(jrRaw) != SPECIAL_JR || RS(jrRaw) == GPR_RA)
+                {
+                    continue;
+                }
+
+                const uint32_t targetReg = RS(jrRaw);
+                uint32_t loadIndex = jrIndex;
+                for (uint32_t i = jrIndex; i-- > lookbackBegin(jrIndex, kLoadLookbackWords);)
+                {
+                    const uint32_t raw = wordAt(i);
+                    if ((OPCODE(raw) == OPCODE_LW || OPCODE(raw) == OPCODE_LWU) && RT(raw) == targetReg)
+                    {
+                        loadIndex = i;
+                        break;
+                    }
+                }
+                if (loadIndex == jrIndex)
+                {
+                    continue;
+                }
+
+                const uint32_t loadRaw = wordAt(loadIndex);
+                const uint32_t addressReg = RS(loadRaw);
+                uint32_t addIndex = loadIndex;
+                for (uint32_t i = loadIndex; i-- > lookbackBegin(loadIndex, kAddLookbackWords);)
+                {
+                    const uint32_t raw = wordAt(i);
+                    if (OPCODE(raw) == OPCODE_SPECIAL &&
+                        (FUNCTION(raw) == SPECIAL_ADDU || FUNCTION(raw) == SPECIAL_DADDU) &&
+                        RD(raw) == addressReg)
+                    {
+                        addIndex = i;
+                        break;
+                    }
+                }
+                if (addIndex == loadIndex)
+                {
+                    continue;
+                }
+
+                // Either addend may hold the table base depending on register allocation.
+                const uint32_t addRaw = wordAt(addIndex);
+                bool foundTable = false;
+                uint32_t tableAddress = 0;
+                for (uint32_t i = addIndex; i-- > lookbackBegin(addIndex, kUpperLookbackWords);)
+                {
+                    const uint32_t raw = wordAt(i);
+                    const uint32_t upperReg = RT(raw);
+                    if (OPCODE(raw) != OPCODE_LUI || upperReg == GPR_ZERO ||
+                        (upperReg != RS(addRaw) && upperReg != RT(addRaw)))
+                    {
+                        continue;
+                    }
+
+                    uint32_t low = 0;
+                    for (uint32_t j = i + 1; j < addIndex; ++j)
+                    {
+                        const uint32_t lowRaw = wordAt(j);
+                        if (RS(lowRaw) != upperReg || RT(lowRaw) != upperReg)
+                        {
+                            continue;
+                        }
+                        if (OPCODE(lowRaw) == OPCODE_ADDIU)
+                        {
+                            low = static_cast<uint32_t>(SIMMEDIATE(lowRaw));
+                        }
+                        else if (OPCODE(lowRaw) == OPCODE_ORI)
+                        {
+                            low = IMMEDIATE(lowRaw);
+                        }
+                    }
+                    // The low half may instead be folded into the load offset.
+                    tableAddress = (IMMEDIATE(raw) << 16) + low + static_cast<uint32_t>(SIMMEDIATE(loadRaw));
+                    foundTable = true;
+                    break;
+                }
+                if (!foundTable)
+                {
+                    continue;
+                }
+
+                const ps2recomp::Section *tableSection = FindSectionByAddress(sections, tableAddress);
+                if (!tableSection || tableSection->isCode || (tableAddress % sizeof(uint32_t)) != 0)
+                {
+                    continue;
+                }
+
+                const uint32_t jrAddress = section.address + jrIndex * MIPS_INSTRUCTION_SIZE;
+                const auto next = std::upper_bound(boundaries.begin(), boundaries.end(), jrAddress);
+                const uint32_t regionBegin = next == boundaries.begin() ? section.address : *std::prev(next);
+                const uint32_t regionEnd = next == boundaries.end() ? section.address + section.size : *next;
+
+                auto [it, inserted] = tables.try_emplace(tableAddress, regionBegin, regionEnd);
+                if (!inserted)
+                {
+                    it->second.first = std::min(it->second.first, regionBegin);
+                    it->second.second = std::max(it->second.second, regionEnd);
+                }
+            }
+        }
+        return tables;
+    }
+
+    // Source addresses of jump-table words: the run of case labels starting at
+    // each table base, ending at the first word that cannot be a case label of
+    // the dispatching function.
+    std::unordered_set<uint32_t> CollectSwitchJumpTableWords(const std::vector<ps2recomp::Section> &sections,
+                                                             const SwitchJumpTables &tables)
+    {
+        std::unordered_set<uint32_t> words;
+        for (const auto &[tableAddress, region] : tables)
+        {
+            const ps2recomp::Section *tableSection = FindSectionByAddress(sections, tableAddress);
+            if (!tableSection || !tableSection->data)
+            {
+                continue;
+            }
+
+            for (uint32_t offset = tableAddress - tableSection->address;; offset += sizeof(uint32_t))
+            {
+                uint32_t target = 0;
+                if (!ReadSectionWord(*tableSection, offset, target) ||
+                    (target % MIPS_INSTRUCTION_SIZE) != 0 ||
+                    target < region.first || target >= region.second)
+                {
+                    break;
+                }
+                words.insert(tableSection->address + offset);
+            }
+        }
+        return words;
+    }
+
+    void ScanDataFunctionPointerTables(const std::vector<ps2recomp::Section> &sections, std::unordered_set<uint32_t> &starts,
+                                       const std::unordered_set<uint32_t> &switchJumpTableWords)
     {
         struct PointerCandidate
         {
@@ -1428,6 +1615,11 @@ namespace
             for (uint32_t offset = 0; offset + MIPS_INSTRUCTION_SIZE <= section.size;
                  offset += MIPS_INSTRUCTION_SIZE)
             {
+                if (switchJumpTableWords.contains(section.address + offset))
+                {
+                    continue;
+                }
+
                 uint32_t target = 0;
                 if (ReadSectionWord(section, offset, target) && (target % MIPS_INSTRUCTION_SIZE) == 0 && FindCodeSectionByAddress(sections, target))
                 {
@@ -1649,8 +1841,12 @@ namespace
             }
         }
 
+        // Snapshot before address-taken scans so only call targets bound a switch.
+        const std::unordered_set<uint32_t> switchJumpTableWords =
+            CollectSwitchJumpTableWords(sections, CollectSwitchJumpTables(sections, starts));
+
         ScanMaterializedCodeAddresses(sections, starts);
-        ScanDataFunctionPointerTables(sections, starts);
+        ScanDataFunctionPointerTables(sections, starts, switchJumpTableWords);
         ScanAdjacentLeafThunkRuns(sections, starts);
 
         std::vector<uint32_t> sortedStarts(starts.begin(), starts.end());
