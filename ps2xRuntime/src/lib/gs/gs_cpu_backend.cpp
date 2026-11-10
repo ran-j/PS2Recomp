@@ -873,9 +873,10 @@ namespace
     }
 
     constexpr size_t kMaxPendingPrimitives = 8192u;
-    // Row ranges per participant: pixel estimates are only bounding boxes, so finer ranges taken on
-    // demand even out what the estimate gets wrong.
-    constexpr uint32_t kBandsPerWorker = 4u;
+    // Row ranges per participant: pixel estimates are only bounding boxes, and a participant can run on a
+    // slow core or be preempted, so ranges down to single 8-row groups taken on demand keep every participant
+    // busy until the batch ends (4 per participant left workers 16% idle in 3D scenes).
+    constexpr uint32_t kBandsPerWorker = 32u;
     constexpr uint64_t kMaxPendingPixels = 1u << 22u;
     // Below this, waking the workers costs more than drawing the batch on the calling thread.
     constexpr uint64_t kMinParallelPixels = 16384u;
@@ -1262,7 +1263,8 @@ void GSCpuBackend::RasterizeTrackedInParallel()
     std::vector<RowRange> rows;
     BalanceRows(m_pendingRowWeights, bands, rows);
     const std::bitset<512> kept = m_pendingTexturePages & m_pendingWritePages;
-    std::vector<GSMem::TexturePageCache> caches(bands);
+    std::vector<GSMem::TexturePageCache> &caches = m_bandCaches;
+    caches.resize(bands);
     std::vector<RasterStats> bandStats(gsStatsEnabled() ? bands : 0u);
     m_undoLogs.resize(bands);
     for (uint32_t i = 0; i < bands; ++i)
@@ -1382,7 +1384,10 @@ void GSCpuBackend::RasterizePendingInParallel()
     const uint32_t bands = m_workers->participants() * kBandsPerWorker;
     std::vector<RowRange> rows;
     BalanceRows(m_pendingRowWeights, bands, rows);
-    std::vector<GSMem::TexturePageCache> caches(bands);
+    std::vector<GSMem::TexturePageCache> &caches = m_bandCaches;
+    caches.resize(bands);
+    for (GSMem::TexturePageCache &cache : caches)
+        cache.ResetForBand(false);
     std::vector<RasterTrace> traces(bands);
     std::vector<RasterStats> bandStats(gsStatsEnabled() ? bands : 0u);
     const std::function<void(uint32_t)> band = [&](uint32_t index)

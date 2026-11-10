@@ -356,4 +356,6 @@ private:
     // Rebuilds the texture cache's copied page after a parallel draw into the page it holds.
     std::vector<uint8_t> m_pageRebuildScratch;
     std::vector<std::vector<UndoEntry>> m_undoLogs;
+    // One texture page cache per band, kept between batches: each holds an 8 KB page copy.
+    std::vector<GSMem::TexturePageCache> m_bandCaches;
 };
