@@ -24,6 +24,7 @@
 #include <limits>
 #include <chrono>
 #include <atomic>
+#include <cstdio>
 #include <cstdlib>
 #include <thread>
 #include <unordered_map>
@@ -389,6 +390,30 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
     static std::vector<uint8_t> s_uploadBuffer(DEFAULT_FB_SIZE, 0u);
 
     const uint64_t currentTick = rt->eeScheduler().currentVSyncTick();
+    // PS2X_PERF_LOG=1 prints guest vblanks/s against host frames/s every 5 s, so a
+    // scripted run's log shows where the game drops below full speed.
+    {
+        static const bool s_perfLog = std::getenv("PS2X_PERF_LOG") != nullptr;
+        if (s_perfLog)
+        {
+            static auto s_lastReport = std::chrono::steady_clock::now();
+            static uint64_t s_lastTick = currentTick;
+            static uint32_t s_hostFrames = 0u;
+            ++s_hostFrames;
+            const auto now = std::chrono::steady_clock::now();
+            const double elapsed = std::chrono::duration<double>(now - s_lastReport).count();
+            if (elapsed >= 5.0)
+            {
+                std::fprintf(stderr, "[perf] vsync=%llu guest_vps=%.1f host_fps=%.1f\n",
+                             static_cast<unsigned long long>(currentTick),
+                             static_cast<double>(currentTick - s_lastTick) / elapsed,
+                             static_cast<double>(s_hostFrames) / elapsed);
+                s_lastReport = now;
+                s_lastTick = currentTick;
+                s_hostFrames = 0u;
+            }
+        }
+    }
     const bool needsLatch = !s_hasLatchedInitialFrame || currentTick != s_lastPresentationTick;
     if (needsLatch)
     {
