@@ -1,5 +1,6 @@
 // Based on Blackline Interactive implementation
 #include "runtime/ps2_memory.h"
+#include <algorithm>
 #include <cstring>
 
 enum VIFCmd : uint8_t
@@ -78,6 +79,15 @@ namespace
         }
 
         return 0u;
+    }
+
+    void uploadMicroMemory(uint8_t *micro, uint32_t microSize, uint32_t address,
+                           const uint8_t *data, uint32_t size)
+    {
+        const uint32_t firstSize = std::min(size, microSize - address);
+        std::memcpy(micro + address, data, firstSize);
+        if (firstSize < size)
+            std::memcpy(micro, data + firstSize, size - firstSize);
     }
 }
 
@@ -170,25 +180,19 @@ void PS2Memory::processVIF0Data(const uint8_t *data, uint32_t sizeBytes)
         }
         else if (opcode == VIF_MPG)
         {
-            const uint32_t destAddr = static_cast<uint32_t>(imm & 0x1FFu) * 8u;
+            const uint32_t destAddr =
+                (static_cast<uint32_t>(imm) * 8u) & (PS2_VU0_CODE_SIZE - 1u);
             const uint32_t instructionCount = (num == 0u) ? 256u : static_cast<uint32_t>(num);
             const uint32_t mpgBytes = instructionCount * 8u;
-            uint32_t copyBytes = 0u;
-            if (m_vu0Code && destAddr < PS2_VU0_CODE_SIZE && mpgBytes > 0u)
-            {
-                copyBytes = mpgBytes;
-                if (destAddr + copyBytes > PS2_VU0_CODE_SIZE)
-                    copyBytes = PS2_VU0_CODE_SIZE - destAddr;
-                if (pos + copyBytes <= sizeBytes)
-                {
-                    std::memcpy(m_vu0Code + destAddr, data + pos, copyBytes);
-                    markVU0CodeModified();
-                }
-            }
-
-            pos += mpgBytes;
-            if (pos > sizeBytes)
+            if (sizeBytes - pos < mpgBytes)
                 break;
+
+            if (m_vu0Code)
+            {
+                uploadMicroMemory(m_vu0Code, PS2_VU0_CODE_SIZE, destAddr, data + pos, mpgBytes);
+                markVU0CodeModified();
+            }
+            pos += mpgBytes;
             continue;
         }
         else if ((opcode & 0x60u) == 0x60u)
@@ -466,23 +470,19 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         }
         else if (opcode == VIF_MPG)
         {
-            uint32_t destAddr = (uint32_t)imm * 8u;
+            const uint32_t destAddr =
+                (static_cast<uint32_t>(imm) * 8u) & (PS2_VU1_CODE_SIZE - 1u);
             const uint32_t instructionCount = (num == 0u) ? 256u : static_cast<uint32_t>(num);
             const uint32_t mpgBytes = instructionCount * 8u;
-            if (m_vu1Code && destAddr < PS2_VU1_CODE_SIZE && mpgBytes > 0)
+            if (sizeBytes - pos < mpgBytes)
+                break;
+
+            if (m_vu1Code)
             {
-                uint32_t copyBytes = mpgBytes;
-                if (destAddr + copyBytes > PS2_VU1_CODE_SIZE)
-                    copyBytes = PS2_VU1_CODE_SIZE - destAddr;
-                if (pos + copyBytes <= sizeBytes)
-                {
-                    std::memcpy(m_vu1Code + destAddr, data + pos, copyBytes);
-                    markVU1CodeModified();
-                }
+                uploadMicroMemory(m_vu1Code, PS2_VU1_CODE_SIZE, destAddr, data + pos, mpgBytes);
+                markVU1CodeModified();
             }
             pos += mpgBytes;
-            if (pos > sizeBytes)
-                break;
             continue;
         }
         else if (opcode == VIF_DIRECT || opcode == VIF_DIRECTHL)
