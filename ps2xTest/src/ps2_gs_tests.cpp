@@ -619,13 +619,43 @@ void register_ps2_gs_tests()
             setRegU32(ctx, 5, GS_PSM_CT24);
             setRegU32(ctx, 6, 640u);
             setRegU32(ctx, 7, 448u);
+            setRegU32(ctx, 10, 1u); // clear
             ps2_stubs::sceGsSetDefDBuffDc(rdram.data(), &ctx, &runtime);
 
             GsDBuffDcMem db{};
             std::memcpy(&db, rdram.data() + kEnvAddr, sizeof(db));
-            t.Equals(db.draw11.frame1.value & 0x1FFull, 140ull, "the second draw buffer should start after the first");
             t.Equals(db.draw11.zbuf1.value & 0x1FFull, 280ull, "Z should follow both frame buffers");
-            t.Equals(db.disp[0].dispfb & 0x1FFull, 140ull, "the first display env should show the second buffer");
+            // libgraph: SwapDBuffDc(0) shows page 0 (disp[0]) and draws through draw0x into page 140.
+            t.Equals(db.disp[0].dispfb & 0x1FFull, 0ull, "disp[0] shows page 0");
+            t.Equals(db.disp[1].dispfb & 0x1FFull, 140ull, "disp[1] shows the second buffer");
+            t.Equals(db.draw01.frame1.value & 0x1FFull, 140ull, "draw01 renders into the second buffer");
+            t.Equals(db.draw02.frame2.value & 0x1FFull, 140ull, "draw02 renders into the second buffer");
+            t.Equals(db.draw11.frame1.value & 0x1FFull, 0ull, "draw11 renders into page 0");
+            t.Equals(db.draw12.frame2.value & 0x1FFull, 0ull, "draw12 renders into page 0");
+            t.Equals(db.clear1.prim.value, static_cast<uint64_t>(GS_PRIM_SPRITE), "both clears are context-1 sprites");
+        });
+
+        tc.Run("sceGsSetDefDBuffDc shares one buffer in interlaced field mode", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            constexpr uint32_t kEnvAddr = 0x4000u;
+            resetGraphForTest(rdram, runtime, 1u, 0u);
+
+            R5900Context ctx{};
+            setRegU32(ctx, 4, kEnvAddr);
+            setRegU32(ctx, 5, GS_PSM_CT24);
+            setRegU32(ctx, 6, 640u);
+            setRegU32(ctx, 7, 224u);
+            ps2_stubs::sceGsSetDefDBuffDc(rdram.data(), &ctx, &runtime);
+
+            GsDBuffDcMem db{};
+            std::memcpy(&db, rdram.data() + kEnvAddr, sizeof(db));
+            t.Equals(db.disp[1].dispfb & 0x1FFull, 0ull, "field mode leaves disp[1] on page 0");
+            t.Equals(db.draw01.frame1.value & 0x1FFull, 0ull, "field mode leaves draw01 on page 0");
+            t.Equals(db.draw01.zbuf1.value & 0x1FFull, 70ull, "Z follows the single 70-page buffer");
+            resetGraphForTest(rdram, runtime, 1u, 1u);
         });
 
         tc.Run("sceGsSetDefDBuffDc seeds a clear packet and swap clears the draw buffer", [](TestCase &t)
@@ -639,11 +669,11 @@ void register_ps2_gs_tests()
             constexpr uint32_t kClear0Offset = 0x160u;
             constexpr uint32_t kTestAAddrOffset = kClear0Offset + 0x08u;
             constexpr uint32_t kPrimAddrOffset = kClear0Offset + 0x18u;
-            constexpr uint32_t kRgbaqOffset = kClear0Offset + 0x20u;
             constexpr uint32_t kRgbaqAddrOffset = kClear0Offset + 0x28u;
             constexpr uint32_t kXyz2AAddrOffset = kClear0Offset + 0x38u;
             constexpr uint32_t kXyz2BAddrOffset = kClear0Offset + 0x48u;
             constexpr uint32_t kTestBAddrOffset = kClear0Offset + 0x58u;
+            constexpr uint32_t kClear1RgbaqOffset = 0x2D0u + 0x20u;
             constexpr uint32_t kClearColor = 0x80402010u;
             constexpr uint32_t kStackAddr = 0x900u;
             const uint32_t kZTest = 2u;
@@ -682,11 +712,11 @@ void register_ps2_gs_tests()
             t.Equals(testBAddr, 0x47ull, "dbuff clear packet should restore TEST_1 after clearing");
 
             uint64_t rgbaq = static_cast<uint64_t>(kClearColor);
-            std::memcpy(rdram.data() + kEnvAddr + kRgbaqOffset, &rgbaq, sizeof(rgbaq));
+            std::memcpy(rdram.data() + kEnvAddr + kClear1RgbaqOffset, &rgbaq, sizeof(rgbaq));
 
             std::memset(&ctx, 0, sizeof(ctx));
             setRegU32(ctx, 4, kEnvAddr);
-            setRegU32(ctx, 5, 0u);
+            setRegU32(ctx, 5, 1u); // buffer 1 draws into page 0
             ps2_stubs::sceGsSwapDBuffDc(rdram.data(), &ctx, &runtime);
 
             uint32_t clearedPixel = 0u;
@@ -703,16 +733,16 @@ void register_ps2_gs_tests()
                      "sceGsSwapDBuffDc should clear the interior of the active draw buffer, not just the first pixel");
 
             // A GIF tag that stops after the two draw environments (NLOOP 16) sends no clear.
-            constexpr uint32_t kGiftag0Offset = 0x50u;
+            constexpr uint32_t kGiftag1Offset = 0x1C0u;
             uint64_t giftag = 0u;
-            std::memcpy(&giftag, rdram.data() + kEnvAddr + kGiftag0Offset, sizeof(giftag));
+            std::memcpy(&giftag, rdram.data() + kEnvAddr + kGiftag1Offset, sizeof(giftag));
             t.Equals(giftag & 0x7FFFull, 22ull, "a clearing dbuff should send 22 A+D registers");
             giftag = (giftag & ~0x7FFFull) | 16ull;
-            std::memcpy(rdram.data() + kEnvAddr + kGiftag0Offset, &giftag, sizeof(giftag));
+            std::memcpy(rdram.data() + kEnvAddr + kGiftag1Offset, &giftag, sizeof(giftag));
             std::memset(runtime.memory().getGSVRAM(), 0x5A, 16u);
             std::memset(&ctx, 0, sizeof(ctx));
             setRegU32(ctx, 4, kEnvAddr);
-            setRegU32(ctx, 5, 0u);
+            setRegU32(ctx, 5, 1u);
             ps2_stubs::sceGsSwapDBuffDc(rdram.data(), &ctx, &runtime);
             uint32_t keptPixel = 0u;
             std::memcpy(&keptPixel, runtime.memory().getGSVRAM(), sizeof(keptPixel));
@@ -728,8 +758,8 @@ void register_ps2_gs_tests()
             constexpr uint32_t kEnvAddr = 0x5400u;
             constexpr uint32_t kDBuffSize = 0x330u;
             constexpr uint32_t kClear0Offset = 0x160u;
-            constexpr uint32_t kRgbaqOffset = kClear0Offset + 0x20u;
             constexpr uint32_t kRgbaqAddrOffset = kClear0Offset + 0x28u;
+            constexpr uint32_t kClear1RgbaqOffset = 0x2D0u + 0x20u;
             constexpr uint32_t kStackAddr = 0xA00u;
             constexpr uint32_t kClearColor = 0x40201008u;
 
@@ -753,11 +783,11 @@ void register_ps2_gs_tests()
                      "sceGsSetDefDBuffDc should seed the clear packet when trailing args arrive in t0-t2");
 
             const uint64_t rgbaq = static_cast<uint64_t>(kClearColor);
-            std::memcpy(rdram.data() + kEnvAddr + kRgbaqOffset, &rgbaq, sizeof(rgbaq));
+            std::memcpy(rdram.data() + kEnvAddr + kClear1RgbaqOffset, &rgbaq, sizeof(rgbaq));
 
             std::memset(&ctx, 0, sizeof(ctx));
             setRegU32(ctx, 4, kEnvAddr);
-            setRegU32(ctx, 5, 0u);
+            setRegU32(ctx, 5, 1u); // buffer 1 draws into page 0
             ps2_stubs::sceGsSwapDBuffDc(rdram.data(), &ctx, &runtime);
 
             uint32_t clearedPixel = 0u;

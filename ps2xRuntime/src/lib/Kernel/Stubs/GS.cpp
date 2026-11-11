@@ -956,10 +956,13 @@ namespace ps2_stubs
         const uint32_t zbufAddr = static_cast<uint32_t>(
             libgraphZbufAddr(psm, static_cast<int32_t>(w), static_cast<int32_t>(h)));
 
-        // sceGszbufaddr places Z after both frame buffers, so the second buffer starts halfway there.
-        const uint32_t fbp1 = zbufAddr / 2u;
-        const uint64_t dispfb0 = makeDispFb(fbp1, fbw, psm, 0u, 0u);
-        const uint64_t dispfb1 = makeDispFb(0u, fbw, psm, 0u, 0u);
+        // Z sits after both frame buffers, so libgraph puts the second buffer halfway there. Buffer 0
+        // (shown by disp[0], drawn through draw1x) stays at page 0; disp[1] and draw0x get the second page,
+        // so SwapDBuffDc(0) shows page 0 while drawing the other. Interlaced field mode shares one buffer.
+        const bool fieldInterlace = g_gparam.interlace != 0u && !(g_gparam.interlace == 1u && g_gparam.ffmode == 1u);
+        const uint32_t fbp1 = fieldInterlace ? 0u : (static_cast<uint32_t>(static_cast<int32_t>(zbufAddr) >> 1) & 0x1FFu);
+        const uint64_t dispfb0 = makeDispFb(0u, fbw, psm, 0u, 0u);
+        const uint64_t dispfb1 = makeDispFb(fbp1, fbw, psm, 0u, 0u);
 
         GsDBuffDcMem db{};
         db.disp[0].pmode = pmode;
@@ -971,16 +974,20 @@ namespace ps2_stubs
         db.disp[1].dispfb = dispfb1;
 
         const bool seedClear = clear != 0u;
+        const bool dithered = (psm & 2u) != 0u;
         db.giftag0 = {makeGiftagAplusD(seedClear ? 22u : 16u), 0xEULL};
-        seedGsDrawEnv1(db.draw01, drawWidth, drawHeight, 0u, fbw, psm, zbufAddr, zpsm, ztest, false);
-        seedGsDrawEnv2(db.draw02, drawWidth, drawHeight, 0u, fbw2, psm, zbufAddr, zpsm, ztest, false);
+        seedGsDrawEnv1(db.draw01, drawWidth, drawHeight, fbp1, fbw, psm, zbufAddr, zpsm, ztest, dithered);
+        seedGsDrawEnv2(db.draw02, drawWidth, drawHeight, fbp1, fbw2, psm, zbufAddr, zpsm, ztest, dithered);
         db.giftag1 = db.giftag0;
-        seedGsDrawEnv1(db.draw11, drawWidth, drawHeight, fbp1, fbw, psm, zbufAddr, zpsm, ztest, false);
-        seedGsDrawEnv2(db.draw12, drawWidth, drawHeight, fbp1, fbw2, psm, zbufAddr, zpsm, ztest, false);
+        seedGsDrawEnv1(db.draw11, drawWidth, drawHeight, 0u, fbw, psm, zbufAddr, zpsm, ztest, dithered);
+        seedGsDrawEnv2(db.draw12, drawWidth, drawHeight, 0u, fbw2, psm, zbufAddr, zpsm, ztest, dithered);
         if (seedClear)
         {
+            // Both are sceGsSetDefClear packets: context 1, Q = 1.0, black, Z 0.
             seedGsClearPacket(db.clear0, drawWidth, drawHeight, 0u, ztest, false);
-            seedGsClearPacket(db.clear1, drawWidth, drawHeight, 0u, ztest, true);
+            seedGsClearPacket(db.clear1, drawWidth, drawHeight, 0u, ztest, false);
+            db.clear0.rgbaq.value |= 0x3F800000ull << 32;
+            db.clear1.rgbaq.value |= 0x3F800000ull << 32;
         }
 
         if (!writeGsDBuffDc(rdram, envAddr, db))
