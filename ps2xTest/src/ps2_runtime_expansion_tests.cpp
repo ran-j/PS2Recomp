@@ -995,6 +995,22 @@ void register_ps2_runtime_expansion_tests()
                      "sprintf should return the rendered length");
         });
 
+        tc.Run("rand follows newlib's 31-bit LCG", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            R5900Context ctx{};
+
+            setRegU32(ctx, 4, 1u);
+            ps2_stubs::srand(rdram.data(), &ctx, &runtime);
+            const int32_t expected[3] = {1481765933, 1085377743, 1270216262};
+            for (int32_t value : expected)
+            {
+                ps2_stubs::rand(rdram.data(), &ctx, &runtime);
+                t.Equals(getRegS32(ctx, 2), value, "rand should return newlib's sequence for seed 1");
+            }
+        });
+
         tc.Run("vfprintf fills guest newlib string FILEs from doubleword va_list slots", [](TestCase &t)
         {
             PS2Runtime runtime;

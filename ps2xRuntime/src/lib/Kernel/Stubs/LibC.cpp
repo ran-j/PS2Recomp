@@ -1111,14 +1111,20 @@ namespace ps2_stubs
         setReturnU32(ctx, 0u);
     }
 
+    // newlib's rand(): a 64-bit LCG seeded with 1 that returns bits 32..62, so RAND_MAX is 0x7FFFFFFF.
+    // Games scale by that range (Mana Khemia takes rand() >> 8 before every modulo), so a 15-bit host
+    // rand() collapsed their results to 0..127.
+    static uint64_t g_newlibRandNext = 1u;
+
     void rand(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        setReturnS32(ctx, std::rand() & 0x7FFF);
+        g_newlibRandNext = (g_newlibRandNext * 6364136223846793005ull) + 1u;
+        setReturnS32(ctx, static_cast<int32_t>((g_newlibRandNext >> 32) & 0x7FFFFFFFu));
     }
 
     void srand(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        std::srand(getRegU32(ctx, 4));
+        g_newlibRandNext = getRegU32(ctx, 4);
         setReturnS32(ctx, 0);
     }
 
