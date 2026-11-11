@@ -1216,11 +1216,19 @@ void GSCpuBackend::FlushPendingUnlocked(FlushReason reason)
         gsStats().flushes[static_cast<size_t>(reason)].fetch_add(1u, std::memory_order_relaxed);
 
     bool parallel = m_pendingPixels >= kMinParallelPixels && RasterParticipants() > 1u;
+    // A tracked batch too small to wake the workers is still drawn as a band, on this thread: drawn serially
+    // it would get palette loads queued in between wrong (see LoadClutNow).
+    bool inlineBand = false;
     uint32_t livePage = 0u;
-    if (parallel && m_pendingTracked)
+    if (m_pendingTracked && m_texturePageCache.MatchesVram(m_vram))
     {
         // Bands read pages in place; the serial cache state is rebuilt afterwards from VRAM.
-        parallel = m_texturePageCache.MatchesVram(m_vram);
+        inlineBand = !parallel;
+        parallel = true;
+    }
+    else if (parallel && m_pendingTracked)
+    {
+        parallel = false;
     }
     else if (parallel && !m_texturePageCache.LivePage(livePage) && m_texturePageCache.CachedPage(livePage))
     {
@@ -1242,7 +1250,7 @@ void GSCpuBackend::FlushPendingUnlocked(FlushReason reason)
     GSStatTimer timer(kind == 0 ? kTimeTracked : kind == 1 ? kTimeUntracked : kTimeSerialBatch);
     if (parallel && m_pendingTracked)
     {
-        RasterizeTrackedInParallel();
+        RasterizeTrackedInParallel(inlineBand);
     }
     else if (parallel)
     {
@@ -1259,7 +1267,7 @@ void GSCpuBackend::FlushPendingUnlocked(FlushReason reason)
     ClearPendingUnlocked();
 }
 
-void GSCpuBackend::RasterizeTrackedInParallel()
+void GSCpuBackend::RasterizeTrackedInParallel(bool inlineBand)
 {
     // Every primitive samples only top bytes of the pages the batch draws into with RGB24/Z24, so every
     // pixel comes out the same drawn in any order. What a serial draw also leaves behind is the texture
@@ -1272,9 +1280,9 @@ void GSCpuBackend::RasterizeTrackedInParallel()
     uint32_t cachedBefore = UINT32_MAX;
     m_texturePageCache.CachedPage(cachedBefore);
 
-    if (!m_workers || m_workers->participants() != RasterParticipants())
+    if (!inlineBand && (!m_workers || m_workers->participants() != RasterParticipants()))
         m_workers = std::make_unique<RasterWorkers>(RasterParticipants());
-    const uint32_t bands = m_workers->participants() * kBandsPerWorker;
+    const uint32_t bands = inlineBand ? 1u : m_workers->participants() * kBandsPerWorker;
     std::vector<RowRange> rows;
     BalanceRows(m_pendingRowWeights, bands, rows);
     const std::bitset<512> kept = m_pendingTexturePages & m_pendingWritePages;
@@ -1309,7 +1317,10 @@ void GSCpuBackend::RasterizeTrackedInParallel()
             DrawPrimitiveRows(m_pending[i], raster);
         }
     };
-    m_workers->runBands(bands, band);
+    if (inlineBand)
+        band(0u);
+    else
+        m_workers->runBands(bands, band);
     for (uint32_t i = 0; i < bandStats.size(); ++i)
     {
         AddRasterStats(bandStats[i]);
@@ -1892,10 +1903,11 @@ void GSCpuBackend::LoadClutNow(const GSTex0Reg &tex0, const GSTexClutReg &texclu
     }
 
     // LoadClutUnlocked reads VRAM (moving the texture page cache) only for 16- and 32-bit palettes. A tracked
-    // batch accounts for that read only when it is drawn in parallel, which it will be if it is big enough
-    // already and the cache stays a faithful copy; otherwise it is drawn before the load.
+    // batch accounts for that read when it is drawn by bands (in parallel, or as one band on this thread when
+    // small), which it will be while the cache stays a faithful copy; otherwise it is drawn before the load.
+    // Drawing small tracked batches before every load ended them after about 4 primitives in 3D scenes.
     const bool readsVram = tex0.cpsm == GS_PSM_CT16 || tex0.cpsm == GS_PSM_CT16S || tex0.cpsm == GS_PSM_CT32 || tex0.cpsm == GS_PSM_CT24;
-    if (readsVram && m_pendingTracked && (m_pendingPixels < kMinParallelPixels || !m_texturePageCache.MatchesVram(m_vram)))
+    if (readsVram && m_pendingTracked && !m_texturePageCache.MatchesVram(m_vram))
         FlushPendingUnlocked(FlushReason::Clut);
     LoadClutUnlocked(tex0, texclut);
     if (readsVram)

@@ -220,7 +220,7 @@ private:
     void QueuePrimitive(const GSPrimitiveBatch &batch);
     void FlushPendingUnlocked(FlushReason reason = FlushReason::Other);
     void RasterizePendingInParallel();
-    void RasterizeTrackedInParallel();
+    void RasterizeTrackedInParallel(bool inlineBand);
     void ClearPendingUnlocked();
     uint32_t RasterParticipants() const;
     void DrawSprite(const GSPrimitiveBatch &batch, const RasterContext &raster);
