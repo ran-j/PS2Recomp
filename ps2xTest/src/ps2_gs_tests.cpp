@@ -654,10 +654,10 @@ void register_ps2_gs_tests()
             setRegU32(ctx, 5, 0u);
             setRegU32(ctx, 6, 640u);
             setRegU32(ctx, 7, 448u);
+            setRegU32(ctx, 8, kZTest);
+            setRegU32(ctx, 10, kEnableClear);
             setRegU32(ctx, 29, kStackAddr);
             std::memset(rdram.data() + kEnvAddr, 0xCD, kDBuffSize);
-            std::memcpy(rdram.data() + kStackAddr + 16u, &kZTest, sizeof(kZTest));
-            std::memcpy(rdram.data() + kStackAddr + 24u, &kEnableClear, sizeof(kEnableClear));
             std::memset(runtime.memory().getGSVRAM(), 0xAB, 16u);
             ps2_stubs::sceGsSetDefDBuffDc(rdram.data(), &ctx, &runtime);
 
@@ -888,6 +888,32 @@ void register_ps2_gs_tests()
             GsDrawEnv1Mem env{};
             std::memcpy(&env, rdram.data() + kEnvAddr, sizeof(env));
             t.Equals(env.zbuf1.value & 0x1FFull, 70ull, "ZBP should be libgraph's sceGszbufaddr(CT16, 640, 448)");
+        });
+
+        tc.Run("sceGsSetDefDrawEnv reads ztest and zpsm from t0/t1 even when both are zero", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            constexpr uint32_t kEnvAddr = 0x4000u;
+            constexpr uint32_t kSp = 0x8000u;
+            const uint32_t staleFrame[2] = {2u, 0xAu}; // whatever the caller left at sp+16/sp+20
+            std::memcpy(rdram.data() + kSp + 16u, staleFrame, sizeof(staleFrame));
+
+            R5900Context ctx{};
+            setRegU32(ctx, 4, kEnvAddr);
+            setRegU32(ctx, 5, GS_PSM_CT16);
+            setRegU32(ctx, 6, 640u);
+            setRegU32(ctx, 7, 448u);
+            setRegU32(ctx, 8, 0u);
+            setRegU32(ctx, 9, 0u);
+            setRegU32(ctx, 29, kSp);
+            ps2_stubs::sceGsSetDefDrawEnv(rdram.data(), &ctx, &runtime);
+
+            GsDrawEnv1Mem env{};
+            std::memcpy(&env, rdram.data() + kEnvAddr, sizeof(env));
+            t.Equals(env.test1.value, 0x30000ull, "ztest 0 should draw with ZTST ALWAYS");
+            t.Equals(env.zbuf1.value >> 24, 0x100ull, "ztest 0 should mask Z writes with zpsm 0");
         });
 
         tc.Run("XYZ3 culls a triangle strip primitive without desynchronizing the vertex queue", [](TestCase &t)
