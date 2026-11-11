@@ -2149,7 +2149,15 @@ namespace ps2recomp
         uint32_t start = function.start;
         uint32_t end = function.end;
 
-        for (uint32_t address = start; address < end; address += 4)
+        // A branch in the last word still owns the word after it: when the next function starts on that delay
+        // slot, decode it here too so the branch executes the real instruction instead of a NOP.
+        auto endsInBranch = [&](uint32_t address)
+        {
+            return address == end && !instructions.empty() && instructions.back().hasDelaySlot &&
+                   instructions.back().address + 4u == end && m_elfParser->isValidAddress(address);
+        };
+
+        for (uint32_t address = start; address < end || endsInBranch(address); address += 4)
         {
             try
             {

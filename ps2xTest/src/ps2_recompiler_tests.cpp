@@ -430,6 +430,61 @@ static bool writeMinimalMipsElfWithStandaloneEntryBlock(const std::filesystem::p
     return writer.save(elfPath.string());
 }
 
+static bool writeMinimalMipsElfWithDelaySlotOnNextFunction(const std::filesystem::path &elfPath)
+{
+    ELFIO::elfio writer;
+    writer.create(ELFIO::ELFCLASS32, ELFIO::ELFDATA2LSB);
+    writer.set_os_abi(ELFIO::ELFOSABI_NONE);
+    writer.set_type(ELFIO::ET_EXEC);
+    writer.set_machine(ELFIO::EM_MIPS);
+    writer.set_entry(0x00100000u);
+
+    ELFIO::section *text = writer.sections.add(".text");
+    text->set_type(ELFIO::SHT_PROGBITS);
+    text->set_flags(ELFIO::SHF_ALLOC | ELFIO::SHF_EXECINSTR);
+    text->set_addr_align(4);
+    text->set_address(0x00100000u);
+
+    const std::array<uint32_t, 8> textWords = {
+        0x27BDFFF0u, // wrapper: addiu $sp, $sp, -0x10
+        0x08040006u, // j 0x00100018
+        0x27BD0010u, // slot_entry (also wrapper's delay slot): addiu $sp, $sp, 0x10
+        0x03E00008u, // jr $ra
+        0x00000000u, // nop
+        0x00000000u, // nop
+        0x03E00008u, // target at 0x00100018: jr $ra
+        0x00000000u  // nop
+    };
+    text->set_data(reinterpret_cast<const char *>(textWords.data()),
+                   static_cast<ELFIO::Elf_Word>(textWords.size() * sizeof(uint32_t)));
+
+    ELFIO::section *strtab = writer.sections.add(".strtab");
+    strtab->set_type(ELFIO::SHT_STRTAB);
+    strtab->set_addr_align(1);
+
+    ELFIO::section *symtab = writer.sections.add(".symtab");
+    symtab->set_type(ELFIO::SHT_SYMTAB);
+    symtab->set_info(1);
+    symtab->set_link(strtab->get_index());
+    symtab->set_addr_align(4);
+    symtab->set_entry_size(writer.get_default_entry_size(ELFIO::SHT_SYMTAB));
+
+    ELFIO::symbol_section_accessor symbols(writer, symtab);
+    ELFIO::string_section_accessor strings(strtab);
+    symbols.add_symbol(strings, "", 0, 0, ELFIO::STB_LOCAL, ELFIO::STT_NOTYPE, 0, ELFIO::SHN_UNDEF);
+    symbols.add_symbol(strings, "wrapper", 0x00100000u, 8u, ELFIO::STB_GLOBAL, ELFIO::STT_FUNC, 0, text->get_index());
+    symbols.add_symbol(strings, "slot_entry", 0x00100008u, 12u, ELFIO::STB_GLOBAL, ELFIO::STT_FUNC, 0, text->get_index());
+    symbols.add_symbol(strings, "target", 0x00100018u, 8u, ELFIO::STB_GLOBAL, ELFIO::STT_FUNC, 0, text->get_index());
+
+    ELFIO::segment *textSegment = writer.segments.add();
+    textSegment->set_type(ELFIO::PT_LOAD);
+    textSegment->set_flags(ELFIO::PF_R | ELFIO::PF_X);
+    textSegment->set_align(0x1000);
+    textSegment->add_section_index(text->get_index(), text->get_addr_align());
+
+    return writer.save(elfPath.string());
+}
+
 static bool writeMinimalMipsElfWithAddressTakenCallbacks(const std::filesystem::path &elfPath,
                                                          bool includePartialDwarf = false)
 {
@@ -1647,6 +1702,46 @@ void register_ps2_recompiler_tests()
                     std::istreambuf_iterator<char>()};
                 t.IsTrue(registration.find("// 0x100008") != std::string::npos,
                          "JAL return address inside a standalone entry_ block should be registered as a resume point");
+            }
+
+            std::error_code removeError;
+            std::filesystem::remove_all(tempRoot, removeError);
+        });
+
+        tc.Run("a jump in a function's last word executes its delay slot even when the next function starts there", [](TestCase &t) {
+            const std::string uniqueSuffix =
+                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+            const std::filesystem::path tempRoot =
+                std::filesystem::temp_directory_path() / ("ps2recomp-delay-slot-boundary-" + uniqueSuffix);
+            const std::filesystem::path elfPath = tempRoot / "delay-slot.elf";
+            const std::filesystem::path configPath = tempRoot / "delay-slot.toml";
+            const std::filesystem::path outputPath = tempRoot / "output";
+            std::filesystem::create_directories(tempRoot);
+
+            const bool elfWritten = writeMinimalMipsElfWithDelaySlotOnNextFunction(elfPath);
+            const bool configWritten = writeRecompilerTestConfig(configPath, elfPath, outputPath, {});
+            t.IsTrue(elfWritten && configWritten, "delay slot boundary inputs should be generated");
+
+            if (elfWritten && configWritten)
+            {
+                PS2Recompiler recompiler(configPath.string());
+                t.IsTrue(recompiler.initialize(), "delay slot boundary config should initialize");
+                t.IsTrue(recompiler.recompile(), "delay slot boundary ELF should recompile");
+                recompiler.generateOutput();
+
+                std::string wrapperSource;
+                for (const auto &entry : std::filesystem::directory_iterator(outputPath))
+                {
+                    if (entry.path().filename().string().rfind("wrapper", 0) != 0)
+                        continue;
+                    std::ifstream file(entry.path());
+                    wrapperSource.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+                }
+                t.IsTrue(!wrapperSource.empty(), "wrapper should be emitted to its own file");
+                // Dropping the delay slot left $sp 0x10 low after the tail jump, so the caller reloaded $ra from
+                // the wrong stack slot (Mana Khemia froze in the synthesis menu that way).
+                t.IsTrue(wrapperSource.find("ADD32(GPR_U32(ctx, 29), 16)") != std::string::npos,
+                         "the J at the end of wrapper should run its delay slot (addiu $sp, $sp, 0x10)");
             }
 
             std::error_code removeError;
