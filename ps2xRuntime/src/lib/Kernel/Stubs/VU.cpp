@@ -895,7 +895,8 @@ namespace ps2_stubs
         const uint32_t dstAddr = getRegU32(ctx, 4);
         const uint32_t matAddr = getRegU32(ctx, 5);
         const uint32_t vAddr = getRegU32(ctx, 6);
-        const bool fullFtoi4 = (getRegU32(ctx, 7) != 0);
+        // libvu0 applies VFTOI0 to z/w only when mode is nonzero; mode 0 keeps all four lanes in 12.4.
+        const bool fullFtoi4 = (getRegU32(ctx, 7) == 0);
         float m[16]{}, v[4]{};
         if (readVuMatrix4f(rdram, matAddr, m) && readVuVec4f(rdram, vAddr, v))
         {
@@ -912,7 +913,7 @@ namespace ps2_stubs
         const uint32_t matAddr = getRegU32(ctx, 5);
         uint32_t vAddr = getRegU32(ctx, 6);
         const int32_t count = static_cast<int32_t>(getRegU32(ctx, 7));
-        const bool fullFtoi4 = (getRegU32(ctx, 8) != 0);
+        const bool fullFtoi4 = (getRegU32(ctx, 8) == 0);
         float m[16]{};
         if (readVuMatrix4f(rdram, matAddr, m))
         {

@@ -833,7 +833,7 @@ void register_ps2_vu_tests()
             SET_GPR_U32(&env.ctx, 4, kDst);
             SET_GPR_U32(&env.ctx, 5, kA);
             SET_GPR_U32(&env.ctx, 6, kB);
-            SET_GPR_U32(&env.ctx, 7, 1u); // fullFtoi4 = true
+            SET_GPR_U32(&env.ctx, 7, 0u); // mode 0: all four lanes VFTOI4
             ps2_stubs::sceVu0RotTransPers(env.rdram.data(), &env.ctx, &env.runtime);
             int32_t out[4]{};
             readVec4i(env, kDst, out);
@@ -841,7 +841,7 @@ void register_ps2_vu_tests()
                      "RotTransPers should perspective-divide x/y/z then FTOI4, with w taking the un-divided FTOI4 value");
         });
 
-        tc.Run("RotTransPers_ftoi0_z_when_flag0", [](TestCase &t)
+        tc.Run("RotTransPers_ftoi0_zw_when_mode_nonzero", [](TestCase &t)
         {
             VuEnv env;
             float ident[16]{};
@@ -851,12 +851,12 @@ void register_ps2_vu_tests()
             SET_GPR_U32(&env.ctx, 4, kDst);
             SET_GPR_U32(&env.ctx, 5, kA);
             SET_GPR_U32(&env.ctx, 6, kB);
-            SET_GPR_U32(&env.ctx, 7, 0u); // fullFtoi4 = false
+            SET_GPR_U32(&env.ctx, 7, 1u); // libvu0: mode != 0 runs VFTOI0 on z/w (integer Z for 32-bit Z buffers)
             ps2_stubs::sceVu0RotTransPers(env.rdram.data(), &env.ctx, &env.runtime);
             int32_t out[4]{};
             readVec4i(env, kDst, out);
-            t.IsTrue(out[2] == 8 && out[3] == 2,
-                     "RotTransPers should FTOI0-truncate z/w instead of FTOI4 when fullFtoi4 is clear");
+            t.IsTrue(out[0] == 256 && out[1] == 512 && out[2] == 8 && out[3] == 2,
+                     "RotTransPers should keep x/y in 12.4 and FTOI0-truncate z/w when mode is nonzero");
         });
 
         tc.Run("RotTransPers_persp_wzero_zero", [](TestCase &t)
@@ -889,7 +889,7 @@ void register_ps2_vu_tests()
             //   t1 = m1*1 + m5*2 + m9*3  + m13*1 = 3 + 2  + 0  + 20 = 25
             //   t2 = m2*1 + m6*2 + m10*3 + m14*1 = 0 + 8  + 3  + 30 = 41
             //   t3 = m3*1 + m7*2 + m11*3 + m15*1 = 1
-            // fullFtoi4=true => every lane x16: (432, 400, 656, 16).
+            // mode 0 => every lane x16: (432, 400, 656, 16).
             VuEnv env;
             float m[16] = {
                 2.0f, 3.0f, 0.0f, 0.0f,
@@ -902,7 +902,7 @@ void register_ps2_vu_tests()
             SET_GPR_U32(&env.ctx, 4, kDst);
             SET_GPR_U32(&env.ctx, 5, kA);
             SET_GPR_U32(&env.ctx, 6, kB);
-            SET_GPR_U32(&env.ctx, 7, 1u); // fullFtoi4 = true
+            SET_GPR_U32(&env.ctx, 7, 0u); // mode 0: all four lanes VFTOI4
             ps2_stubs::sceVu0RotTransPers(env.rdram.data(), &env.ctx, &env.runtime);
             int32_t out[4]{};
             readVec4i(env, kDst, out);
@@ -922,7 +922,7 @@ void register_ps2_vu_tests()
             SET_GPR_U32(&env.ctx, 5, kA);
             SET_GPR_U32(&env.ctx, 6, kArr);
             SET_GPR_U32(&env.ctx, 7, 2u);
-            SET_GPR_U32(&env.ctx, 8, 1u);
+            SET_GPR_U32(&env.ctx, 8, 0u); // mode 0: all four lanes VFTOI4
             ps2_stubs::sceVu0RotTransPersN(env.rdram.data(), &env.ctx, &env.runtime);
             int32_t out0[4]{}, out1[4]{};
             readVec4i(env, kDst, out0);
