@@ -1030,6 +1030,24 @@ void GSCpuBackend::BalanceRows(const RowWeights &weights, uint32_t participants,
     ranges[band] = {begin, std::numeric_limits<int>::max()};
 }
 
+void GSCpuBackend::OrderBands(const RowWeights &weights, const std::vector<RowRange> &ranges, std::vector<uint32_t> &order)
+{
+    // Heaviest first: a heavy band taken last keeps every other participant waiting for it at the end of
+    // the batch.
+    std::vector<uint64_t> load(ranges.size(), 0u);
+    for (size_t i = 0; i < ranges.size(); ++i)
+    {
+        const int64_t begin = std::max<int64_t>(ranges[i].begin, 0);
+        const int64_t end = std::min<int64_t>(ranges[i].end, static_cast<int64_t>(kRowGroups) * 8);
+        for (int64_t group = begin / 8; group < (end + 7) / 8; ++group)
+            load[i] += weights[static_cast<size_t>(group)];
+    }
+    order.resize(ranges.size());
+    for (uint32_t i = 0; i < order.size(); ++i)
+        order[i] = i;
+    std::stable_sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) { return load[a] > load[b]; });
+}
+
 GSCpuBackend::~GSCpuBackend()
 {
     SetAsync(false);
@@ -1334,6 +1352,7 @@ void GSCpuBackend::LaunchInFlight(bool tracked, bool inlineBand)
         m_workers = std::make_unique<RasterWorkers>(RasterParticipants());
     const uint32_t bands = inlineBand ? 1u : m_workers->participants() * kBandsPerWorker;
     BalanceRows(m_pendingRowWeights, bands, f.bands);
+    OrderBands(m_pendingRowWeights, f.bands, f.order);
     f.tracked = tracked;
     f.kept = m_pendingTexturePages & m_pendingWritePages;
     // Grown only: one-band batches alternate with full ones, and each cache holds an 8 KB page.
@@ -1364,7 +1383,7 @@ void GSCpuBackend::LaunchInFlight(bool tracked, bool inlineBand)
     {
         for (uint32_t i = m_inflight.next.fetch_add(1u, std::memory_order_relaxed); i < bands;
              i = m_inflight.next.fetch_add(1u, std::memory_order_relaxed))
-            RasterizeInFlightBand(i);
+            RasterizeInFlightBand(m_inflight.order[i]);
     };
     f.active = true;
     f.inlineBand = inlineBand;
@@ -3691,44 +3710,51 @@ bool GSCpuBackend::ClearFramebufferNow(const GSContext &context, uint32_t rgba)
 
     const uint32_t fbp = GSInternal::framePageBaseToBlock(context.frame.fbp);
     const uint32_t fbw = std::max<uint32_t>(context.frame.fbw, 1u);
-    if (context.frame.psm == GS_PSM_CT32 || context.frame.psm == GS_PSM_CT24)
+    if (context.frame.psm != GS_PSM_CT32 && context.frame.psm != GS_PSM_CT24 && context.frame.psm != GS_PSM_CT16 &&
+        context.frame.psm != GS_PSM_CT16S)
+        return false;
+    // WriteVramUnlocked snapshots the texture cache's live page before the first write to it. A row writes
+    // exactly the pages of its span and the live page keeps its bytes until then, so checking every row up
+    // front is the same, and leaves the rows free to be written directly and in parallel.
+    for (uint32_t y = y0; y <= y1; ++y)
     {
-        const uint32_t source = static_cast<uint32_t>(r) |
-                                (static_cast<uint32_t>(g) << 8u) |
-                                (static_cast<uint32_t>(b) << 16u) |
-                                (static_cast<uint32_t>(a) << 24u);
-        for (uint32_t y = y0; y <= y1; ++y)
+        uint32_t livePage = 0u;
+        if (!m_texturePageCache.LivePage(livePage))
+            break;
+        if (spanHasPage(pageSpan(fbp, fbw, context.frame.psm, x0, y, x1, y), livePage / GSMem::TexturePageCache::kPageSize))
+            m_texturePageCache.Snapshot(m_vram);
+    }
+    const WriteVramFunc write = m_writeVramFuncs[context.frame.psm & 0x3Fu];
+    const ReadVramFunc read = m_readVramFuncs[context.frame.psm & 0x3Fu];
+    const bool sixteen = context.frame.psm == GS_PSM_CT16 || context.frame.psm == GS_PSM_CT16S;
+    const uint32_t mask = sixteen ? static_cast<uint16_t>(context.frame.fbmsk) : context.frame.fbmsk;
+    const uint32_t source = sixteen ? encodeFramePixelPSMCT16(r, g, b, a)
+                                    : static_cast<uint32_t>(r) | (static_cast<uint32_t>(g) << 8u) |
+                                          (static_cast<uint32_t>(b) << 16u) | (static_cast<uint32_t>(a) << 24u);
+    auto clearRows = [&](uint32_t first, uint32_t last)
+    {
+        for (uint32_t y = first; y <= last; ++y)
             for (uint32_t x = x0; x <= x1; ++x)
             {
                 uint32_t pixel = source;
-                if (context.frame.fbmsk != 0u)
-                {
-                    const uint32_t old = ReadVramUnlocked(context.frame.psm, fbp, fbw, x, y);
-                    pixel = (pixel & ~context.frame.fbmsk) | (old & context.frame.fbmsk);
-                }
-                WriteVramUnlocked(context.frame.psm, fbp, fbw, x, y, pixel);
-            }
-        return true;
-    }
-
-    if (context.frame.psm == GS_PSM_CT16 || context.frame.psm == GS_PSM_CT16S)
-    {
-        const uint16_t source = encodeFramePixelPSMCT16(r, g, b, a);
-        const uint16_t mask = static_cast<uint16_t>(context.frame.fbmsk);
-        for (uint32_t y = y0; y <= y1; ++y)
-            for (uint32_t x = x0; x <= x1; ++x)
-            {
-                uint16_t pixel = source;
                 if (mask != 0u)
-                {
-                    const uint16_t old = static_cast<uint16_t>(ReadVramUnlocked(context.frame.psm, fbp, fbw, x, y));
-                    pixel = static_cast<uint16_t>((pixel & ~mask) | (old & mask));
-                }
-                WriteVramUnlocked(context.frame.psm, fbp, fbw, x, y, pixel);
+                    pixel = (pixel & ~mask) | (read(m_vram, fbp, fbw, x, y) & mask);
+                write(m_vram, fbp, fbw, x, y, sixteen ? (pixel & 0xFFFFu) : pixel);
             }
+    };
+    const uint64_t pixels = static_cast<uint64_t>(y1 - y0 + 1u) * static_cast<uint64_t>(x1 - x0 + 1u);
+    if (pixels < kMinParallelPixels || RasterParticipants() <= 1u)
+    {
+        clearRows(y0, y1);
         return true;
     }
-    return false;
+    // A pixel's bytes belong to its row alone, so rows clear independently.
+    if (!m_workers || m_workers->participants() != RasterParticipants())
+        m_workers = std::make_unique<RasterWorkers>(RasterParticipants());
+    const uint32_t chunks = (y1 - y0) / 8u + 1u;
+    m_workers->runBands(chunks, [&](uint32_t chunk)
+                        { clearRows(y0 + chunk * 8u, std::min(y1, y0 + chunk * 8u + 7u)); });
+    return true;
 }
 
 bool GSCpuBackend::CopyFrameToHostRgba(const GSFrameReg &frame,

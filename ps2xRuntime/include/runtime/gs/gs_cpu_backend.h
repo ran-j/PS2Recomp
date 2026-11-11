@@ -215,6 +215,8 @@ private:
         int end = 0;
     };
     static void BalanceRows(const RowWeights &weights, uint32_t participants, std::vector<RowRange> &ranges);
+    // Band indices in the order participants should take them.
+    static void OrderBands(const RowWeights &weights, const std::vector<RowRange> &ranges, std::vector<uint32_t> &order);
 
     void DrawPrimitive(const GSPrimitiveBatch &batch, const uint32_t *clut = nullptr);
     void DrawPrimitiveRows(const GSPrimitiveBatch &batch, const RasterContext &raster);
@@ -385,6 +387,7 @@ private:
         size_t clutReadIndex = 0;
         uint32_t cachedBefore = UINT32_MAX;
         std::vector<RowRange> bands;
+        std::vector<uint32_t> order;
         std::bitset<512> kept;
         std::vector<RasterTrace> traces;
         std::vector<RasterStats> bandStats;
