@@ -346,7 +346,7 @@ namespace
         }
     }
 
-    bool passesAlphaTest(uint64_t testReg, uint8_t alpha)
+    __attribute__((always_inline)) inline bool passesAlphaTest(uint64_t testReg, uint8_t alpha)
     {
         if ((testReg & 0x1u) == 0u)
             return true;
@@ -394,7 +394,8 @@ namespace
         }
     };
 
-    PixelWriteMask classifyAlphaTest(uint64_t testReg, uint8_t alpha, uint8_t framePsm)
+    // Runs for every pixel; as a call it showed up on its own in raster profiles.
+    __attribute__((always_inline)) inline PixelWriteMask classifyAlphaTest(uint64_t testReg, uint8_t alpha, uint8_t framePsm)
     {
         const bool pass = passesAlphaTest(testReg, alpha);
         if (pass)
@@ -3301,6 +3302,55 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch, const RasterContext
             float ty = (static_cast<float>(y - unclippedY0) + 0.5f) / spriteH;
             float texVf = v0f + (v1f - v0f) * ty;
             const TextureAxis row = PrepareTextureAxis(axisCoordinate(texVf, texH), texH, wrapV, minV, maxV, state.linearFilter);
+
+            if (raster.batched)
+            {
+                // As for batched triangles: a chunk is sampled, then written as one span.
+                auto writeRow = [&](auto frameFormat, auto depthFormat)
+                {
+                    constexpr uint32_t kFrame = decltype(frameFormat)::value;
+                    constexpr uint32_t kDepth = decltype(depthFormat)::value;
+                    SpanPixels span;
+                    for (int chunkX = drawX0; chunkX <= drawX1; chunkX += SpanPixels::kMax)
+                    {
+                        const int count = std::min(SpanPixels::kMax, drawX1 - chunkX + 1);
+                        uint32_t texels[SpanPixels::kMax];
+                        for (int i = 0; i < count; ++i)
+                        {
+                            const int x = chunkX + i;
+                            raster.beginSample(y, x);
+                            texels[i] = SampleTextureAxes(sampler, columns[static_cast<size_t>(x - drawX0)], row);
+                            raster.sampled(y, x);
+                        }
+                        span.count = count;
+                        for (int i = 0; i < count; ++i)
+                        {
+                            const uint32_t texel = texels[i];
+                            const TextureCombineResult color = combineTexture(tex, r, g, b, a,
+                                                                              static_cast<uint8_t>(texel & 0xFF), static_cast<uint8_t>((texel >> 8) & 0xFF),
+                                                                              static_cast<uint8_t>((texel >> 16) & 0xFF), static_cast<uint8_t>((texel >> 24) & 0xFF));
+                            if constexpr (kFrame != kAnyTarget && kDepth != kAnyTarget)
+                            {
+                                span.x[i] = chunkX + i;
+                                span.z[i] = static_cast<int>(z1);
+                                span.r[i] = color.r;
+                                span.g[i] = color.g;
+                                span.b[i] = color.b;
+                                span.a[i] = color.a;
+                                span.fog[i] = v1.fog;
+                            }
+                            else
+                            {
+                                writtenPixels += WritePixelFor<kFrame, kDepth>(pipe, chunkX + i, y, z1, color.r, color.g, color.b, color.a, v1.fog) ? 1u : 0u;
+                            }
+                        }
+                        if constexpr (kFrame != kAnyTarget && kDepth != kAnyTarget)
+                            writtenPixels += WriteSpanFor<kFrame, kDepth>(pipe, y, span);
+                    }
+                };
+                dispatchTargetFormats(pipe.fpsm, pipe.zpsm, writeRow);
+                continue;
+            }
 
             for (int x = drawX0; x <= drawX1; ++x)
             {
