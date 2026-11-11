@@ -890,6 +890,30 @@ void register_ps2_gs_tests()
             t.Equals(env.zbuf1.value & 0x1FFull, 70ull, "ZBP should be libgraph's sceGszbufaddr(CT16, 640, 448)");
         });
 
+        tc.Run("sceGsSetDefDrawEnv2 truncates FBW where sceGsSetDefDrawEnv rounds it up", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            constexpr uint32_t kEnv1 = 0x4000u;
+            constexpr uint32_t kEnv2 = 0x4100u;
+            R5900Context ctx{};
+            setRegU32(ctx, 4, kEnv1);
+            setRegU32(ctx, 5, GS_PSM_CT32);
+            setRegU32(ctx, 6, 600u);
+            setRegU32(ctx, 7, 448u);
+            ps2_stubs::sceGsSetDefDrawEnv(rdram.data(), &ctx, &runtime);
+            setRegU32(ctx, 4, kEnv2);
+            ps2_stubs::sceGsSetDefDrawEnv2(rdram.data(), &ctx, &runtime);
+
+            GsDrawEnv1Mem env1{};
+            GsDrawEnv2Mem env2{};
+            std::memcpy(&env1, rdram.data() + kEnv1, sizeof(env1));
+            std::memcpy(&env2, rdram.data() + kEnv2, sizeof(env2));
+            t.Equals((env1.frame1.value >> 16) & 0x3Full, 10ull, "FRAME_1 FBW is (600 + 63) >> 6");
+            t.Equals((env2.frame2.value >> 16) & 0x3Full, 9ull, "FRAME_2 FBW is 600 >> 6");
+        });
+
         tc.Run("sceGsSetDefDrawEnv reads ztest and zpsm from t0/t1 even when both are zero", [](TestCase &t)
         {
             PS2Runtime runtime;

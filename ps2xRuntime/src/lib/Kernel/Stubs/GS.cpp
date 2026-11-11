@@ -943,6 +943,7 @@ namespace ps2_stubs
         }
 
         const uint32_t fbw = std::max<uint32_t>(1u, (w + 63u) / 64u);
+        const uint32_t fbw2 = (w >> 6) & 0x3Fu; // sceGsSetDefDrawEnv2 truncates
         const uint64_t pmode = makePmode(1u, 1u, 0u, 0u, 0u, 0x80u);
         const uint64_t smode2 =
             (static_cast<uint64_t>(g_gparam.interlace & 0x1u) << 0) |
@@ -972,10 +973,10 @@ namespace ps2_stubs
         const bool seedClear = clear != 0u;
         db.giftag0 = {makeGiftagAplusD(seedClear ? 22u : 16u), 0xEULL};
         seedGsDrawEnv1(db.draw01, drawWidth, drawHeight, 0u, fbw, psm, zbufAddr, zpsm, ztest, false);
-        seedGsDrawEnv2(db.draw02, drawWidth, drawHeight, 0u, fbw, psm, zbufAddr, zpsm, ztest, false);
+        seedGsDrawEnv2(db.draw02, drawWidth, drawHeight, 0u, fbw2, psm, zbufAddr, zpsm, ztest, false);
         db.giftag1 = db.giftag0;
         seedGsDrawEnv1(db.draw11, drawWidth, drawHeight, fbp1, fbw, psm, zbufAddr, zpsm, ztest, false);
-        seedGsDrawEnv2(db.draw12, drawWidth, drawHeight, fbp1, fbw, psm, zbufAddr, zpsm, ztest, false);
+        seedGsDrawEnv2(db.draw12, drawWidth, drawHeight, fbp1, fbw2, psm, zbufAddr, zpsm, ztest, false);
         if (seedClear)
         {
             seedGsClearPacket(db.clear0, drawWidth, drawHeight, 0u, ztest, false);
@@ -1126,7 +1127,8 @@ namespace ps2_stubs
             h = 448;
 
         uint32_t psm = param_2 & 0xFU;
-        uint32_t fbw = ((static_cast<uint32_t>(w) + 63u) >> 6) & 0x3FU;
+        // libgraph rounds FRAME_1 FBW up but truncates FRAME_2 FBW (w >> 6).
+        uint32_t fbw = static_cast<uint32_t>(w >> 6) & 0x3FU;
         const int32_t zbuf = libgraphZbufAddr(static_cast<uint32_t>(static_cast<int16_t>(param_2)), w, h);
 
         GsDrawEnv2Mem env{};
