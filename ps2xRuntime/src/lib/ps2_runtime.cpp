@@ -13,6 +13,7 @@
 #include "Kernel/Stubs/MPEG.h"
 #include "ps2_host_backend.h"
 #include "ps2_iop_host.h"
+#include "ps2_audio_stream.h"
 #include "ps2x/iop/iop_subsystem.h"
 
 #include <iostream>
@@ -391,26 +392,46 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
 
     const uint64_t currentTick = rt->eeScheduler().currentVSyncTick();
     // PS2X_PERF_LOG=1 prints guest vblanks/s against host frames/s every 5 s, so a
-    // scripted run's log shows where the game drops below full speed.
+    // scripted run's log shows where the game drops below full speed. The same line counts
+    // all-black frames latched for display (a black flash a player reports is one of these)
+    // and the host audio ring's underruns and latency drops (audible as skips or crackle).
+    static const bool s_perfLog = std::getenv("PS2X_PERF_LOG") != nullptr;
+    static uint32_t s_blackFrames = 0u;
+    static uint64_t s_lastBlackTick = 0u;
+    static uint32_t s_lastBlackDisplayFbp = 0u;
+    static uint32_t s_lastBlackSourceFbp = 0u;
     {
-        static const bool s_perfLog = std::getenv("PS2X_PERF_LOG") != nullptr;
         if (s_perfLog)
         {
             static auto s_lastReport = std::chrono::steady_clock::now();
             static uint64_t s_lastTick = currentTick;
             static uint32_t s_hostFrames = 0u;
+            static uint64_t s_lastUnderruns = 0u;
+            static uint64_t s_lastAudioDrops = 0u;
             ++s_hostFrames;
             const auto now = std::chrono::steady_clock::now();
             const double elapsed = std::chrono::duration<double>(now - s_lastReport).count();
             if (elapsed >= 5.0)
             {
-                std::fprintf(stderr, "[perf] vsync=%llu guest_vps=%.1f host_fps=%.1f\n",
+                const uint64_t underruns = spu2AudioUnderruns();
+                const uint64_t audioDrops = spu2AudioLatencyDroppedFrames();
+                std::fprintf(stderr,
+                             "[perf] vsync=%llu guest_vps=%.1f host_fps=%.1f black_frames=%u last_black(tick=%llu dispfbp=0x%x srcfbp=0x%x) audio_underruns=+%llu audio_dropped_frames=+%llu\n",
                              static_cast<unsigned long long>(currentTick),
                              static_cast<double>(currentTick - s_lastTick) / elapsed,
-                             static_cast<double>(s_hostFrames) / elapsed);
+                             static_cast<double>(s_hostFrames) / elapsed,
+                             s_blackFrames,
+                             static_cast<unsigned long long>(s_lastBlackTick),
+                             s_lastBlackDisplayFbp,
+                             s_lastBlackSourceFbp,
+                             static_cast<unsigned long long>(underruns - s_lastUnderruns),
+                             static_cast<unsigned long long>(audioDrops - s_lastAudioDrops));
                 s_lastReport = now;
                 s_lastTick = currentTick;
                 s_hostFrames = 0u;
+                s_blackFrames = 0u;
+                s_lastUnderruns = underruns;
+                s_lastAudioDrops = audioDrops;
             }
         }
     }
@@ -450,6 +471,33 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
         s_lastHeight = outHeight;
         s_hasUploadedFrame = true;
         return;
+    }
+
+    if (s_perfLog && needsLatch && !s_scratch.empty() && width != 0u && height != 0u)
+    {
+        bool allBlack = true;
+        const size_t rowBytes = static_cast<size_t>(width) * 4u;
+        for (uint32_t y = 0; y < height && allBlack; ++y)
+        {
+            const uint8_t *row = s_scratch.data() + static_cast<size_t>(y) * rowBytes;
+            if (static_cast<size_t>(y) * rowBytes + rowBytes > s_scratch.size())
+                break;
+            for (uint32_t x = 0; x < width; ++x)
+            {
+                if (row[x * 4u] != 0u || row[x * 4u + 1u] != 0u || row[x * 4u + 2u] != 0u)
+                {
+                    allBlack = false;
+                    break;
+                }
+            }
+        }
+        if (allBlack)
+        {
+            ++s_blackFrames;
+            s_lastBlackTick = currentTick;
+            s_lastBlackDisplayFbp = displayFbp;
+            s_lastBlackSourceFbp = sourceFbp;
+        }
     }
 
     PS2_IF_AGRESSIVE_LOGS({

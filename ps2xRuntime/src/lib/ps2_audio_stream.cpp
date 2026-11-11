@@ -55,6 +55,7 @@ size_t Spu2FrameRing::pop(int16_t *out, size_t frames)
 
     if (queued > m_maxLatency)
     {
+        m_latencyDroppedFrames.fetch_add(queued - m_maxLatency, std::memory_order_relaxed);
         read = (read + queued - m_maxLatency) % m_capacity;
         queued = m_maxLatency;
     }
@@ -101,6 +102,18 @@ namespace
         ring->pop(static_cast<int16_t *>(buffer), frames);
     }
 #endif
+}
+
+uint64_t spu2AudioUnderruns()
+{
+    const Spu2FrameRing *ring = g_activeRing.load(std::memory_order_acquire);
+    return ring ? ring->underruns() : 0u;
+}
+
+uint64_t spu2AudioLatencyDroppedFrames()
+{
+    const Spu2FrameRing *ring = g_activeRing.load(std::memory_order_acquire);
+    return ring ? ring->latencyDroppedFrames() : 0u;
 }
 
 struct Spu2AudioOutput::Impl

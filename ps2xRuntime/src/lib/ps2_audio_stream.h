@@ -23,6 +23,7 @@ public:
 
     [[nodiscard]] size_t available() const noexcept;
     [[nodiscard]] uint64_t underruns() const noexcept { return m_underruns.load(std::memory_order_relaxed); }
+    [[nodiscard]] uint64_t latencyDroppedFrames() const noexcept { return m_latencyDroppedFrames.load(std::memory_order_relaxed); }
 
 private:
     std::vector<int16_t> m_samples;
@@ -33,7 +34,13 @@ private:
     std::atomic<size_t> m_writeIndex{0};
     bool m_starving = true;
     std::atomic<uint64_t> m_underruns{0};
+    std::atomic<uint64_t> m_latencyDroppedFrames{0};
 };
+
+// Counters of the active host audio ring for the perf log: callbacks that found it empty, and frames
+// skipped because the game ran more than the latency budget ahead of the device. Both are audible.
+uint64_t spu2AudioUnderruns();
+uint64_t spu2AudioLatencyDroppedFrames();
 
 // Plays SPU2 output through the host audio device.
 class Spu2AudioOutput
