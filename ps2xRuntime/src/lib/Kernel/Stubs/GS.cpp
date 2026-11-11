@@ -51,6 +51,49 @@ namespace ps2_stubs
             clear.testb = {restoreTest, testReg};
         }
 
+        // libgraph's sceGszbufaddr(psm, w, h): the page where Z starts. It counts one frame buffer when the
+        // CRT is interlaced in field mode and two otherwise; 16-bit formats use 64-line pages.
+        int32_t libgraphZbufAddr(uint32_t psm, int32_t w, int32_t h)
+        {
+            const int32_t widthPages = ((w + 63 < 0) ? (w + 126) : (w + 63)) >> 6;
+            const int32_t heightPages = ((psm & 2u) != 0u)
+                                            ? (((h + 63 < 0) ? (h + 126) : (h + 63)) >> 6)
+                                            : (((h + 31 < 0) ? (h + 62) : (h + 31)) >> 5);
+            const int32_t pages = widthPages * heightPages;
+            const bool fieldInterlace = g_gparam.interlace == 1u && g_gparam.ffmode == 0u;
+            return static_cast<int16_t>(fieldInterlace ? pages : pages * 2);
+        }
+
+        // libgraph's sceGsSetDefDispEnv: read-out circuit 2 only (PMODE 0x66), SMODE2 from the CRT mode,
+        // and a DISPLAY positioned for the video mode with MAGH stretching the width to ~2560 VCK. An
+        // unsupported video mode leaves DISPLAY as it was, as libgraph does after printing its error.
+        void libgraphDefDispEnv(GsDispEnvMem &env, uint32_t psm, int32_t w, int32_t h, int32_t dx, int32_t dy)
+        {
+            const bool interlaced = g_gparam.interlace == 1u;
+            env.pmode = 0x66u;
+            env.smode2 = (g_gparam.interlace == 0u) ? 2u : ((g_gparam.ffmode != 0u) ? 3u : 1u);
+            env.dispfb = (static_cast<uint64_t>(psm & 0xFu) << 15) |
+                         (static_cast<uint64_t>(((w + 63) >> 6) & 0x3F) << 9);
+            if ((g_gparam.omode == 2u || g_gparam.omode == 3u) && w > 0)
+            {
+                const bool pal = g_gparam.omode == 3u;
+                const int32_t mag = (w + 2559) / w;
+                const int32_t displayX = (dx * mag) + (pal ? 656 : 636);
+                const int32_t displayY = dy + (pal ? (interlaced ? 72 : 36) : (interlaced ? 50 : 25));
+                const int32_t displayH = (interlaced && g_gparam.ffmode != 0u) ? ((h * 2) - 1) : (h - 1);
+                env.display = makeDisplay(static_cast<uint32_t>(displayX), static_cast<uint32_t>(displayY),
+                                          static_cast<uint32_t>(mag - 1), 0u, static_cast<uint32_t>((mag * w) - 1),
+                                          static_cast<uint32_t>(displayH));
+            }
+            else if (g_gparam.omode == 0x50u)
+            {
+                const int32_t displayX = (((720 - w) / 2) * 2) + (dx * 2) + 232;
+                env.display = makeDisplay(static_cast<uint32_t>(displayX), static_cast<uint32_t>(dy + 35), 1u, 0u,
+                                          static_cast<uint32_t>((w * 2) - 1), static_cast<uint32_t>(h - 1));
+            }
+            env.bgcolor = 0u;
+        }
+
         bool hasSeededGsClearPacket(const GsClearMem &clear)
         {
             return clear.rgbaq.reg == GS_REG_RGBAQ &&
@@ -71,40 +114,19 @@ namespace ps2_stubs
             uint32_t arg2 = 0u;
         };
 
+        // The EE ABI passes arguments 5-8 in t0-t3; libgraph reads them only from there. Falling back to
+        // the stack when they are zero picked up the caller's frame (sceGsSetDefDrawEnv(..., 0, 0) got a
+        // garbage ztest/zpsm).
         GsTrailingArgs2 decodeGsTrailingArgs2(uint8_t *rdram, R5900Context *ctx)
         {
-            const uint32_t reg8 = getRegU32(ctx, 8);
-            const uint32_t reg9 = getRegU32(ctx, 9);
-            const uint32_t stack0 = readStackU32(rdram, ctx, 16);
-            const uint32_t stack1 = readStackU32(rdram, ctx, 20);
-
-            const bool hasRegArgs = (reg8 != 0u || reg9 != 0u);
-            const bool hasStackArgs = (stack0 != 0u || stack1 != 0u);
-            if (hasRegArgs || !hasStackArgs)
-            {
-                return {reg8, reg9};
-            }
-
-            return {stack0, stack1};
+            (void)rdram;
+            return {getRegU32(ctx, 8), getRegU32(ctx, 9)};
         }
 
         GsTrailingArgs3 decodeGsTrailingArgs3(uint8_t *rdram, R5900Context *ctx)
         {
-            const uint32_t reg8 = getRegU32(ctx, 8);
-            const uint32_t reg9 = getRegU32(ctx, 9);
-            const uint32_t reg10 = getRegU32(ctx, 10);
-            const uint32_t stack0 = readStackU32(rdram, ctx, 16);
-            const uint32_t stack1 = readStackU32(rdram, ctx, 20);
-            const uint32_t stack2 = readStackU32(rdram, ctx, 24);
-
-            const bool hasRegArgs = (reg8 != 0u || reg9 != 0u || reg10 != 0u);
-            const bool hasStackArgs = (stack0 != 0u || stack1 != 0u || stack2 != 0u);
-            if (hasRegArgs || !hasStackArgs)
-            {
-                return {reg8, reg9, reg10};
-            }
-
-            return {stack0, stack1, stack2};
+            (void)rdram;
+            return {getRegU32(ctx, 8), getRegU32(ctx, 9), getRegU32(ctx, 10)};
         }
 
         void applyGsClearPacket(PS2Runtime *runtime, const GsClearMem &clear)
@@ -124,6 +146,7 @@ namespace ps2_stubs
 
         void refreshPacketBuilderPendingCount(uint8_t *rdram, PS2Runtime *runtime, uint32_t stateAddr);
         void writePacketBuilderCurrent(uint8_t *rdram, PS2Runtime *runtime, uint32_t stateAddr, uint32_t currentAddr);
+        void advancePacketBuilderCurrent(uint8_t *rdram, PS2Runtime *runtime, uint32_t stateAddr, uint32_t currentAddr);
 
         void initPacketBuilderState(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
@@ -262,6 +285,26 @@ namespace ps2_stubs
             refreshPacketBuilderPendingCount(rdram, runtime, stateAddr);
         }
 
+        // libpkt's sceGifPkAdd*/Open/Close/Reserve only move pCurrent; the open DMA tag's QWC is added by
+        // sceGifPkTerminate (also run by Cnt/Ref/End). Games can mix these HLE stubs with recompiled
+        // Terminate code, so refreshing the QWC here would make that guest Terminate count it twice.
+        void advancePacketBuilderCurrent(uint8_t *rdram, PS2Runtime *runtime, uint32_t stateAddr, uint32_t currentAddr)
+        {
+            writeGuestU32(rdram, runtime, stateAddr, currentAddr);
+        }
+
+        uint32_t advanceGifPacketWords(uint8_t *rdram, PS2Runtime *runtime, uint32_t stateAddr, uint32_t wordCount)
+        {
+            uint32_t currentAddr = 0u;
+            if (!tryReadWordFromGuest(rdram, runtime, stateAddr, currentAddr))
+            {
+                return 0u;
+            }
+
+            advancePacketBuilderCurrent(rdram, runtime, stateAddr, currentAddr + wordCount * 4u);
+            return currentAddr;
+        }
+
         uint32_t reservePacketBuilderWords(uint8_t *rdram, PS2Runtime *runtime, uint32_t stateAddr, uint32_t wordCount)
         {
             uint32_t currentAddr = 0u;
@@ -311,7 +354,8 @@ namespace ps2_stubs
                               R5900Context *ctx,
                               PS2Runtime *runtime,
                               uint32_t stateAddr,
-                              uint32_t openAddrOffset)
+                              uint32_t openAddrOffset,
+                              bool refreshDmaTag)
         {
             uint32_t currentAddr = 0u;
             if (!tryReadWordFromGuest(rdram, runtime, stateAddr, currentAddr))
@@ -320,11 +364,14 @@ namespace ps2_stubs
             }
 
             writeGuestVec128(rdram, runtime, currentAddr, GPR_VEC(ctx, 5));
-            writePacketBuilderCurrent(rdram, runtime, stateAddr, currentAddr + 16u);
+            if (refreshDmaTag)
+                writePacketBuilderCurrent(rdram, runtime, stateAddr, currentAddr + 16u);
+            else
+                advancePacketBuilderCurrent(rdram, runtime, stateAddr, currentAddr + 16u);
             writeGuestU32(rdram, runtime, stateAddr + openAddrOffset, currentAddr);
         }
 
-        void closePacketGifTag(uint8_t *rdram, PS2Runtime *runtime, uint32_t stateAddr, uint32_t openAddrOffset)
+        void closePacketGifTag(uint8_t *rdram, PS2Runtime *runtime, uint32_t stateAddr, uint32_t openAddrOffset, bool refreshDmaTag)
         {
             uint32_t openAddr = 0u;
             uint32_t currentAddr = 0u;
@@ -366,7 +413,10 @@ namespace ps2_stubs
                 writeGuestU32(rdram, runtime, currentAddr, 0u);
                 currentAddr += 4u;
             }
-            writePacketBuilderCurrent(rdram, runtime, stateAddr, currentAddr);
+            if (refreshDmaTag)
+                writePacketBuilderCurrent(rdram, runtime, stateAddr, currentAddr);
+            else
+                advancePacketBuilderCurrent(rdram, runtime, stateAddr, currentAddr);
         }
     }
 
@@ -383,7 +433,7 @@ namespace ps2_stubs
         const uint64_t regValue = static_cast<uint64_t>(getRegU32(ctx, 5));
         writeGuestU64(rdram, runtime, currentAddr, dataValue);
         writeGuestU64(rdram, runtime, currentAddr + 8u, regValue);
-        writePacketBuilderCurrent(rdram, runtime, stateAddr, currentAddr + 16u);
+        advancePacketBuilderCurrent(rdram, runtime, stateAddr, currentAddr + 16u);
     }
 
     void sceGifPkAddGsData(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -396,13 +446,13 @@ namespace ps2_stubs
         }
 
         writeGuestU64(rdram, runtime, currentAddr, GPR_U64(ctx, 5));
-        writePacketBuilderCurrent(rdram, runtime, stateAddr, currentAddr + 8u);
+        advancePacketBuilderCurrent(rdram, runtime, stateAddr, currentAddr + 8u);
     }
 
     void sceGifPkCloseGifTag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         (void)ctx;
-        closePacketGifTag(rdram, runtime, getRegU32(ctx, 4), 12u);
+        closePacketGifTag(rdram, runtime, getRegU32(ctx, 4), 12u, false);
     }
 
     void sceGifPkCnt(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -450,7 +500,7 @@ namespace ps2_stubs
 
     void sceGifPkOpenGifTag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        openPacketGifTag(rdram, ctx, runtime, getRegU32(ctx, 4), 12u);
+        openPacketGifTag(rdram, ctx, runtime, getRegU32(ctx, 4), 12u, false);
     }
 
     void sceGifPkRef(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -535,7 +585,7 @@ namespace ps2_stubs
                 writeGuestU64(rdram, runtime, addr + 8u, static_cast<uint64_t>(GS_REG_TRXDIR));
                 addr += 16u;
                 writePacketBuilderCurrent(rdram, runtime, stateAddr, addr);
-                closePacketGifTag(rdram, runtime, stateAddr, 12u);
+                closePacketGifTag(rdram, runtime, stateAddr, 12u, true);
             }
         }
 
@@ -582,7 +632,7 @@ namespace ps2_stubs
 
     void sceGifPkReserve(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        setReturnU32(ctx, reservePacketBuilderWords(rdram, runtime, getRegU32(ctx, 4), getRegU32(ctx, 5)));
+        setReturnU32(ctx, advanceGifPacketWords(rdram, runtime, getRegU32(ctx, 4), getRegU32(ctx, 5)));
     }
 
     void sceGifPkTerminate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -631,7 +681,8 @@ namespace ps2_stubs
             return;
         }
 
-        uint32_t dbp = (static_cast<uint32_t>(img.vram_addr) * 2048u) / 256u;
+        // libgraph passes the base pointer straight into BITBLTBUF, in 64-word block units.
+        uint32_t dbp = static_cast<uint32_t>(img.vram_addr);
         uint32_t dsax = static_cast<uint32_t>(img.x);
         uint32_t dsay = static_cast<uint32_t>(img.y);
 
@@ -673,7 +724,7 @@ namespace ps2_stubs
         uint32_t dstAddr = getRegU32(ctx, 5);
 
         GsImageMem img{};
-        if (!runtime || !runtime->syncCoreSubsystems() || !readGsImage(rdram, imgAddr, img))
+        if (!runtime || !runtime->syncCoreSubsystems() || !readGsImage(rdram, imgAddr, img, true))
         {
             setReturnS32(ctx, -1);
             return;
@@ -696,7 +747,7 @@ namespace ps2_stubs
             return;
         }
 
-        uint32_t sbp = (static_cast<uint32_t>(img.vram_addr) * 2048u) / 256u;
+        uint32_t sbp = static_cast<uint32_t>(img.vram_addr);
         uint64_t bitbltbuf = (static_cast<uint64_t>(sbp & 0x3FFFu) << 0) |
                              (static_cast<uint64_t>(fbw & 0x3Fu) << 16) |
                              (static_cast<uint64_t>(img.psm & 0x3Fu) << 24) |
@@ -772,82 +823,49 @@ namespace ps2_stubs
 
     void sceGsPutDrawEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        uint32_t envAddr = getRegU32(ctx, 4);
-        GsRegPairMem pairs[8]{};
-        if (!readGsRegPairs(rdram, envAddr, pairs, 8u))
+        // libgraph DMAs the GIF tag at a0 plus the NLOOP A+D qwords behind it (sceGsSwapDBuffDc passes the
+        // dbuff's giftag), so the first qword is the tag, not a register pair.
+        const uint32_t tagAddr = getRegU32(ctx, 4);
+        GsGiftagMem tag{};
+        const uint8_t *tagPtr = getConstMemPtr(rdram, tagAddr);
+        if (!tagPtr)
         {
             setReturnS32(ctx, -1);
             return;
         }
-        applyGsRegPairs(runtime, pairs, 8u);
+        std::memcpy(&tag, tagPtr, sizeof(tag));
+        const uint32_t nloop = static_cast<uint32_t>(tag.lo & 0x7FFFu);
+        std::vector<GsRegPairMem> pairs(nloop);
+        if (nloop != 0u && !readGsRegPairs(rdram, tagAddr + 16u, pairs.data(), nloop))
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+        applyGsRegPairs(runtime, pairs.data(), nloop);
         setReturnS32(ctx, 0);
     }
 
     void sceGsResetGraph(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        uint32_t mode = getRegU32(ctx, 4);
-        uint32_t interlace = getRegU32(ctx, 5);
-        uint32_t omode = getRegU32(ctx, 6);
-        uint32_t ffmode = getRegU32(ctx, 7);
+        // libgraph: mode 1 only flushes the GS; modes 0 (after a GS reset) and 5 record the CRT parameters
+        // and tail-call SetGsCrt. PMODE/DISPFB/DISPLAY are left to the display env the game puts later.
+        const int16_t mode = static_cast<int16_t>(getRegU32(ctx, 4));
+        const int16_t interlace = static_cast<int16_t>(getRegU32(ctx, 5));
+        const int16_t omode = static_cast<int16_t>(getRegU32(ctx, 6));
+        const int16_t ffmode = static_cast<int16_t>(getRegU32(ctx, 7));
 
-        if (mode == 0)
+        if (mode == 0 || mode == 5)
         {
-            if (runtime && !runtime->syncCoreSubsystems())
-            {
-                setReturnS32(ctx, -1);
-                return;
-            }
-
-            g_gparam.interlace = static_cast<uint8_t>(interlace & 0x1);
-            g_gparam.omode = static_cast<uint8_t>(omode & 0xFF);
-            g_gparam.ffmode = static_cast<uint8_t>(ffmode & 0x1);
+            g_gparam.interlace = static_cast<uint8_t>(interlace);
+            g_gparam.omode = static_cast<uint8_t>(omode);
+            g_gparam.ffmode = ffmode != 0 ? 1u : 0u;
             writeGsGParamToScratch(runtime);
-            uint64_t pmode = makePmode(1, 0, 0, 0, 0, 0x80);
-            uint64_t smode2 = (interlace & 0x1) | ((ffmode & 0x1) << 1);
-            uint64_t dispfb = makeDispFb(0, 10, 0, 0, 0);
-            uint64_t display = makeDisplay(0, 0, 0, 0, 639, 447);
-            uint64_t bgcolor = 0ULL;
 
-            if (runtime)
-            {
-                uint32_t pktAddr = runtime->guestMalloc(128u, 16u);
-                if (pktAddr != 0u)
-                {
-                    uint8_t *pkt = getMemPtr(rdram, pktAddr);
-                    if (pkt)
-                    {
-                        uint64_t *q = reinterpret_cast<uint64_t *>(pkt);
-                        q[0] = makeGiftagAplusD(7u);
-                        q[1] = 0xEULL;
-                        q[2] = pmode;
-                        q[3] = 0x41ULL;
-                        q[4] = smode2;
-                        q[5] = 0x42ULL;
-                        q[6] = dispfb;
-                        q[7] = 0x59ULL;
-                        q[8] = display;
-                        q[9] = 0x5aULL;
-                        q[10] = dispfb;
-                        q[11] = 0x5bULL;
-                        q[12] = display;
-                        q[13] = 0x5cULL;
-                        q[14] = bgcolor;
-                        q[15] = 0x5fULL;
-                        constexpr uint32_t GIF_CHANNEL = 0x1000A000;
-                        constexpr uint32_t CHCR_STR_MODE0 = 0x101u;
-                        auto &mem = runtime->memory();
-                        mem.writeIORegister(GIF_CHANNEL + 0x10u, pktAddr);
-                        mem.writeIORegister(GIF_CHANNEL + 0x20u, 8u);
-                        mem.writeIORegister(GIF_CHANNEL + 0x00u, CHCR_STR_MODE0);
-                        mem.processPendingTransfers();
-                        runtime->guestFree(pktAddr);
-                    }
-                    else
-                    {
-                        runtime->guestFree(pktAddr);
-                    }
-                }
-            }
+            R5900Context crt{};
+            SET_GPR_U32(&crt, 4, static_cast<uint32_t>(interlace & 1));
+            SET_GPR_U32(&crt, 5, static_cast<uint32_t>(omode & 0xFF));
+            SET_GPR_U32(&crt, 6, static_cast<uint32_t>(ffmode & 1));
+            ps2_syscalls::GsSetCrt(rdram, &crt, runtime);
         }
 
         setReturnS32(ctx, 0);
@@ -860,10 +878,45 @@ namespace ps2_stubs
 
     void sceGsSetDefClear(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        (void)rdram;
-        (void)ctx;
         (void)runtime;
-        setReturnS32(ctx, 0);
+        // Mirrors libgraph: an A+D list (no GIFtag) of TEST(ZTST=ALWAYS), PRIM sprite, RGBAQ, two XYZ2
+        // corners and TEST(ztest). Games send it to wipe offscreen targets; without it they keep stale VRAM.
+        // Args: a0 clear, a1 ztest, a2 x, a3 y, t0 w, t1 h, t2 r, t3 g; b, a and z sit at sp+0, sp+8, sp+16.
+        const uint32_t clearAddr = getRegU32(ctx, 4);
+        const int16_t ztest = static_cast<int16_t>(getRegU32(ctx, 5));
+        const int16_t x = static_cast<int16_t>(getRegU32(ctx, 6));
+        const int16_t y = static_cast<int16_t>(getRegU32(ctx, 7));
+        const int16_t w = static_cast<int16_t>(getRegU32(ctx, 8));
+        const int16_t h = static_cast<int16_t>(getRegU32(ctx, 9));
+        const uint64_t r = getRegU32(ctx, 10) & 0xFFu;
+        const uint64_t g = getRegU32(ctx, 11) & 0xFFu;
+        const uint64_t b = readStackU32(rdram, ctx, 0) & 0xFFu;
+        const uint64_t a = readStackU32(rdram, ctx, 8) & 0xFFu;
+        const uint64_t z = readStackU32(rdram, ctx, 16);
+
+        auto xyz = [z](int32_t px, int32_t py)
+        {
+            return (static_cast<uint64_t>(static_cast<uint32_t>(px << 4)) & 0xFFFFu) |
+                   ((static_cast<uint64_t>(static_cast<uint32_t>(py << 4)) & 0xFFFFu) << 16) | (z << 32);
+        };
+
+        GsClearMem clear{};
+        clear.testa = {0x30000ULL, GS_REG_TEST_1};
+        clear.prim = {static_cast<uint64_t>(GS_PRIM_SPRITE), GS_REG_PRIM};
+        clear.rgbaq = {r | (g << 8) | (b << 16) | (a << 24) | (0x3F800000ULL << 32), GS_REG_RGBAQ};
+        clear.xyz2a = {xyz(x, y), GS_REG_XYZ2};
+        clear.xyz2b = {xyz(x + w, y + h), GS_REG_XYZ2};
+        const uint64_t restoreTest = ztest == 0 ? 0x30000ULL : ((static_cast<uint64_t>(ztest & 3) << 17) | 0x10000ULL);
+        clear.testb = {restoreTest, GS_REG_TEST_1};
+        uint8_t *dst = getMemPtr(rdram, clearAddr);
+        if (!dst)
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+        std::memcpy(dst, &clear, sizeof(clear));
+        // libgraph returns the packet length in qwords.
+        setReturnS32(ctx, static_cast<int32_t>(sizeof(clear) / 16u));
     }
 
     void sceGsSetDefDBuffDc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -887,46 +940,39 @@ namespace ps2_stubs
         }
 
         const uint32_t fbw = std::max<uint32_t>(1u, (w + 63u) / 64u);
-        const uint64_t pmode = makePmode(1u, 1u, 0u, 0u, 0u, 0x80u);
-        const uint64_t smode2 =
-            (static_cast<uint64_t>(g_gparam.interlace & 0x1u) << 0) |
-            (static_cast<uint64_t>(g_gparam.ffmode & 0x1u) << 1);
-        const uint64_t display = makeDisplay(636u, 32u, 0u, 0u, w - 1u, h - 1u);
+        const uint32_t fbw2 = (w >> 6) & 0x3Fu; // sceGsSetDefDrawEnv2 truncates
 
         const int32_t drawWidth = static_cast<int32_t>(w);
         const int32_t drawHeight = static_cast<int32_t>(h);
 
-        uint32_t zbufAddr = 0u;
-        {
-            R5900Context temp = *ctx;
-            sceGszbufaddr(rdram, &temp, runtime);
-            zbufAddr = getRegU32(&temp, 2);
-        }
+        const uint32_t zbufAddr = static_cast<uint32_t>(
+            libgraphZbufAddr(psm, static_cast<int32_t>(w), static_cast<int32_t>(h)));
 
-        const uint32_t fbp1 = zbufAddr;
-        const uint64_t dispfb0 = makeDispFb(fbp1, fbw, psm, 0u, 0u);
-        const uint64_t dispfb1 = makeDispFb(0u, fbw, psm, 0u, 0u);
-
+        // Z sits after both frame buffers, so libgraph puts the second buffer halfway there. Buffer 0
+        // (shown by disp[0], drawn through draw1x) stays at page 0; disp[1] and draw0x get the second page,
+        // so SwapDBuffDc(0) shows page 0 while drawing the other. Interlaced field mode shares one buffer.
+        const bool fieldInterlace = g_gparam.interlace != 0u && !(g_gparam.interlace == 1u && g_gparam.ffmode == 1u);
+        const uint32_t fbp1 = fieldInterlace ? 0u : (static_cast<uint32_t>(static_cast<int32_t>(zbufAddr) >> 1) & 0x1FFu);
         GsDBuffDcMem db{};
-        db.disp[0].pmode = pmode;
-        db.disp[0].smode2 = smode2;
-        db.disp[0].dispfb = dispfb0;
-        db.disp[0].display = display;
-        db.disp[0].bgcolor = 0u;
+        libgraphDefDispEnv(db.disp[0], psm, drawWidth, drawHeight, 0, 0);
         db.disp[1] = db.disp[0];
-        db.disp[1].dispfb = dispfb1;
+        db.disp[1].dispfb |= fbp1;
 
         const bool seedClear = clear != 0u;
+        const bool dithered = (psm & 2u) != 0u;
         db.giftag0 = {makeGiftagAplusD(seedClear ? 22u : 16u), 0xEULL};
-        seedGsDrawEnv1(db.draw01, drawWidth, drawHeight, 0u, fbw, psm, zbufAddr, zpsm, ztest, false);
-        seedGsDrawEnv2(db.draw02, drawWidth, drawHeight, 0u, fbw, psm, zbufAddr, zpsm, ztest, false);
+        seedGsDrawEnv1(db.draw01, drawWidth, drawHeight, fbp1, fbw, psm, zbufAddr, zpsm, ztest, dithered);
+        seedGsDrawEnv2(db.draw02, drawWidth, drawHeight, fbp1, fbw2, psm, zbufAddr, zpsm, ztest, dithered);
         db.giftag1 = db.giftag0;
-        seedGsDrawEnv1(db.draw11, drawWidth, drawHeight, fbp1, fbw, psm, zbufAddr, zpsm, ztest, false);
-        seedGsDrawEnv2(db.draw12, drawWidth, drawHeight, fbp1, fbw, psm, zbufAddr, zpsm, ztest, false);
+        seedGsDrawEnv1(db.draw11, drawWidth, drawHeight, 0u, fbw, psm, zbufAddr, zpsm, ztest, dithered);
+        seedGsDrawEnv2(db.draw12, drawWidth, drawHeight, 0u, fbw2, psm, zbufAddr, zpsm, ztest, dithered);
         if (seedClear)
         {
+            // Both are sceGsSetDefClear packets: context 1, Q = 1.0, black, Z 0.
             seedGsClearPacket(db.clear0, drawWidth, drawHeight, 0u, ztest, false);
-            seedGsClearPacket(db.clear1, drawWidth, drawHeight, 0u, ztest, true);
+            seedGsClearPacket(db.clear1, drawWidth, drawHeight, 0u, ztest, false);
+            db.clear0.rgbaq.value |= 0x3F800000ull << 32;
+            db.clear1.rgbaq.value |= 0x3F800000ull << 32;
         }
 
         if (!writeGsDBuffDc(rdram, envAddr, db))
@@ -968,12 +1014,8 @@ namespace ps2_stubs
         const int32_t drawWidth = static_cast<int32_t>(w);
         const int32_t drawHeight = static_cast<int32_t>(h);
 
-        uint32_t zbufAddr = 0u;
-        {
-            R5900Context temp = *ctx;
-            sceGszbufaddr(rdram, &temp, runtime);
-            zbufAddr = getRegU32(&temp, 2);
-        }
+        const uint32_t zbufAddr = static_cast<uint32_t>(
+            libgraphZbufAddr(psm, static_cast<int32_t>(w), static_cast<int32_t>(h)));
 
         GsDBuffMem db{};
         db.disp[0].pmode = pmode;
@@ -998,24 +1040,27 @@ namespace ps2_stubs
 
     void sceGsSetDefDispEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        uint32_t envAddr = getRegU32(ctx, 4);
-        uint32_t psm = getRegU32(ctx, 5);
-        uint32_t w = getRegU32(ctx, 6);
-        uint32_t h = getRegU32(ctx, 7);
+        const uint32_t envAddr = getRegU32(ctx, 4);
+        const uint32_t psm = static_cast<uint32_t>(static_cast<int16_t>(getRegU32(ctx, 5)));
+        int32_t w = static_cast<int16_t>(getRegU32(ctx, 6));
+        int32_t h = static_cast<int16_t>(getRegU32(ctx, 7));
         const GsTrailingArgs2 trailing = decodeGsTrailingArgs2(rdram, ctx);
-        uint32_t dx = trailing.arg0;
-        uint32_t dy = trailing.arg1;
+        const int32_t dx = static_cast<int16_t>(trailing.arg0);
+        const int32_t dy = static_cast<int16_t>(trailing.arg1);
 
-        if (w == 0)
+        if (w <= 0)
             w = 640;
-        if (h == 0)
+        if (h <= 0)
             h = 448;
 
-        uint32_t fbw = (w + 63) / 64;
-        uint64_t dispfb = makeDispFb(0, fbw, psm, 0, 0);
-        uint64_t display = makeDisplay(dx, dy, 0, 0, w - 1, h - 1);
-
-        writeGsDispEnv(rdram, envAddr, display, dispfb);
+        GsDispEnvMem env{};
+        if (!readGsDispEnv(rdram, envAddr, env))
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+        libgraphDefDispEnv(env, psm, w, h, dx, dy);
+        std::memcpy(getMemPtr(rdram, envAddr), &env, sizeof(env));
         setReturnS32(ctx, 0);
     }
 
@@ -1036,8 +1081,7 @@ namespace ps2_stubs
 
         uint32_t psm = param_2 & 0xFU;
         uint32_t fbw = ((static_cast<uint32_t>(w) + 63u) >> 6) & 0x3FU;
-        sceGszbufaddr(rdram, ctx, runtime);
-        int32_t zbuf = static_cast<int32_t>(static_cast<int16_t>(getRegU32(ctx, 2) & 0xFFFF));
+        const int32_t zbuf = libgraphZbufAddr(static_cast<uint32_t>(static_cast<int16_t>(param_2)), w, h);
 
         GsDrawEnv1Mem env{};
         seedGsDrawEnv1(env,
@@ -1078,9 +1122,9 @@ namespace ps2_stubs
             h = 448;
 
         uint32_t psm = param_2 & 0xFU;
-        uint32_t fbw = ((static_cast<uint32_t>(w) + 63u) >> 6) & 0x3FU;
-        sceGszbufaddr(rdram, ctx, runtime);
-        int32_t zbuf = static_cast<int32_t>(static_cast<int16_t>(getRegU32(ctx, 2) & 0xFFFF));
+        // libgraph rounds FRAME_1 FBW up but truncates FRAME_2 FBW (w >> 6).
+        uint32_t fbw = static_cast<uint32_t>(w >> 6) & 0x3FU;
+        const int32_t zbuf = libgraphZbufAddr(static_cast<uint32_t>(static_cast<int16_t>(param_2)), w, h);
 
         GsDrawEnv2Mem env{};
         seedGsDrawEnv2(env,
@@ -1125,7 +1169,20 @@ namespace ps2_stubs
 
     void sceGsSetDefStoreImage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        sceGsSetDefLoadImage(rdram, ctx, runtime);
+        uint32_t imgAddr = getRegU32(ctx, 4);
+        const GsSetDefImageArgs args = decodeGsSetDefImageArgs(rdram, ctx);
+
+        GsImageMem img{};
+        img.x = static_cast<uint16_t>(args.x);
+        img.y = static_cast<uint16_t>(args.y);
+        img.width = static_cast<uint16_t>(args.width);
+        img.height = static_cast<uint16_t>(args.height);
+        img.vram_addr = static_cast<uint16_t>(args.vramAddr);
+        img.vram_width = static_cast<uint8_t>(args.vramWidth);
+        img.psm = static_cast<uint8_t>(args.psm);
+
+        writeGsImage(rdram, imgAddr, img, true);
+        setReturnS32(ctx, 0);
     }
 
     void sceGsSwapDBuffDc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1160,27 +1217,34 @@ namespace ps2_stubs
             });
             ++s_swapDbuffLogCount;
         }
+        // The swap sends NLOOP A+D registers from the buffer's GIF tag: two 8-register draw environments,
+        // then the 6-register clear only when NLOOP reaches it. Games drop the clear by shortening NLOOP
+        // (Mana Khemia does while Sofdec uploads movie frames straight into the framebuffers).
+        const uint32_t nloop = static_cast<uint32_t>((which == 0u ? db.giftag0.lo : db.giftag1.lo) & 0x7FFFu);
+        const bool sendsClear = nloop >= 22u;
         if (which == 0u)
         {
             applyGsRegPairs(runtime, reinterpret_cast<const GsRegPairMem *>(&db.draw01), 8u);
             applyGsRegPairs(runtime, reinterpret_cast<const GsRegPairMem *>(&db.draw02), 8u);
-            if (hasSeededGsClearPacket(db.clear0))
+            if (sendsClear && hasSeededGsClearPacket(db.clear0))
             {
                 const uint32_t clearContext = static_cast<uint32_t>((db.clear0.prim.value >> 9) & 0x1u);
                 runtime->gs().clearFramebufferContext(clearContext, static_cast<uint32_t>(db.clear0.rgbaq.value));
             }
-            applyGsClearPacket(runtime, db.clear0);
+            if (sendsClear)
+                applyGsClearPacket(runtime, db.clear0);
         }
         else
         {
             applyGsRegPairs(runtime, reinterpret_cast<const GsRegPairMem *>(&db.draw11), 8u);
             applyGsRegPairs(runtime, reinterpret_cast<const GsRegPairMem *>(&db.draw12), 8u);
-            if (hasSeededGsClearPacket(db.clear1))
+            if (sendsClear && hasSeededGsClearPacket(db.clear1))
             {
                 const uint32_t clearContext = static_cast<uint32_t>((db.clear1.prim.value >> 9) & 0x1u);
                 runtime->gs().clearFramebufferContext(clearContext, static_cast<uint32_t>(db.clear1.rgbaq.value));
             }
-            applyGsClearPacket(runtime, db.clear1);
+            if (sendsClear)
+                applyGsClearPacket(runtime, db.clear1);
         }
 
         setReturnS32(ctx, static_cast<int32_t>(which ^ 1u));
@@ -1319,47 +1383,11 @@ namespace ps2_stubs
     void sceGszbufaddr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         (void)rdram;
-        uint32_t param_1 = getRegU32(ctx, 4);
-        int32_t w = static_cast<int32_t>(static_cast<int16_t>(getRegU32(ctx, 6) & 0xFFFF));
-        int32_t h = static_cast<int32_t>(static_cast<int16_t>(getRegU32(ctx, 7) & 0xFFFF));
-
-        int32_t width_blocks = (w + 63) >> 6;
-        if (w + 63 < 0)
-            width_blocks = (w + 126) >> 6;
-
-        int32_t height_blocks;
-        if ((param_1 & 2) != 0)
-        {
-            int32_t v = (h + 63) >> 6;
-            if (h + 63 < 0)
-                v = (h + 126) >> 6;
-            height_blocks = v;
-        }
-        else
-        {
-            int32_t v = (h + 31) >> 5;
-            if (h + 31 < 0)
-                v = (h + 62) >> 5;
-            height_blocks = v;
-        }
-
-        int32_t product = width_blocks * height_blocks;
-
-        uint64_t gparam_val = 0;
-        if (runtime)
-        {
-            uint8_t *scratch = runtime->memory().getScratchpad();
-            if (scratch)
-            {
-                std::memcpy(&gparam_val, scratch + 0x100, sizeof(gparam_val));
-            }
-        }
-        if ((gparam_val & 0xFFFF0000FFFFULL) == 1ULL)
-            product = (product * 0x10000) >> 16;
-        else
-            product = (product * 0x20000) >> 16;
-
-        setReturnS32(ctx, product);
+        (void)runtime;
+        const uint32_t psm = static_cast<uint32_t>(static_cast<int16_t>(getRegU32(ctx, 4)));
+        const int32_t w = static_cast<int16_t>(getRegU32(ctx, 5));
+        const int32_t h = static_cast<int16_t>(getRegU32(ctx, 6));
+        setReturnS32(ctx, libgraphZbufAddr(psm, w, h));
     }
 
     void Ps2SwapDBuff(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1453,7 +1481,7 @@ namespace ps2_stubs
     void sceVif1PkCloseGifTag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         (void)ctx;
-        closePacketGifTag(rdram, runtime, getRegU32(ctx, 4), 20u);
+        closePacketGifTag(rdram, runtime, getRegU32(ctx, 4), 20u, true);
     }
 
     void sceVif1PkCnt(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1515,7 +1543,7 @@ namespace ps2_stubs
 
     void sceVif1PkOpenGifTag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        openPacketGifTag(rdram, ctx, runtime, getRegU32(ctx, 4), 20u);
+        openPacketGifTag(rdram, ctx, runtime, getRegU32(ctx, 4), 20u, true);
     }
 
     void sceVif1PkReset(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

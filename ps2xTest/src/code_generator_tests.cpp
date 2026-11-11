@@ -1020,6 +1020,24 @@ void register_code_generator_tests()
             t.IsTrue(ctc1Code.find("ignored") == std::string::npos, "CTC1 FCR31 should not be ignored");
         });
 
+        tc.Run("SQRT.S reads its operand from ft", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+
+            // 0x46160504: sqrt.s $f20, $f22 as the EE encodes it, with the fs field zero.
+            Instruction sqrt{};
+            sqrt.opcode = OPCODE_COP1;
+            sqrt.rs = COP1_S;
+            sqrt.rt = 22;
+            sqrt.rd = 0;
+            sqrt.sa = 20;
+            sqrt.function = COP1_S_SQRT;
+
+            std::string code = gen.translateInstruction(sqrt);
+            printGeneratedCode("SQRT.S reads its operand from ft", code);
+            t.IsTrue(code.find("ctx->f[20] = FPU_SQRT_S(ctx->f[22])") != std::string::npos,
+                     "SQRT.S should take the square root of ft into fd");
+        });
+
         tc.Run("VU CFC2/CTC2 access VI registers directly", [](TestCase& t)
             {
                 CodeGenerator gen({}, {});
@@ -1719,6 +1737,34 @@ void register_code_generator_tests()
             t.IsTrue(generated.find("if (branch_taken_0x1200)") != std::string::npos, "should generate branch_taken variable and if for likely branch");
         });
 
+        tc.Run("sign branches compare the full 64-bit register", [](TestCase &t) {
+            // libmpeg polls IPU_CMD with ld and bgezl; a 32-bit test reads DATA bit 31 as BUSY.
+            const auto conditionFor = [](uint8_t opcode, uint8_t rt) {
+                Function func;
+                func.name = "sign_branch";
+                func.start = 0x1300;
+                func.end = 0x1310;
+                func.isRecompiled = true;
+                func.isStub = false;
+
+                Instruction br{};
+                br.address = 0x1300;
+                br.opcode = opcode;
+                br.rs = 17;
+                br.rt = rt;
+                br.simmediate = 1;
+                br.isBranch = true;
+                br.hasDelaySlot = true;
+
+                CodeGenerator gen({}, {});
+                return gen.generateFunction(func, {br, makeNop(0x1304), makeNop(0x1308)}, false);
+            };
+            t.IsTrue(conditionFor(OPCODE_REGIMM, REGIMM_BGEZL).find("GPR_S64(ctx, 17) >= 0") != std::string::npos, "bgezl should test 64 bits");
+            t.IsTrue(conditionFor(OPCODE_REGIMM, REGIMM_BLTZ).find("GPR_S64(ctx, 17) < 0") != std::string::npos, "bltz should test 64 bits");
+            t.IsTrue(conditionFor(OPCODE_BLEZ, 0).find("GPR_S64(ctx, 17) <= 0") != std::string::npos, "blez should test 64 bits");
+            t.IsTrue(conditionFor(OPCODE_BGTZ, 0).find("GPR_S64(ctx, 17) > 0") != std::string::npos, "bgtz should test 64 bits");
+        });
+
         tc.Run("JR $31 returns through dynamic target without broad local switch", [](TestCase &t) {
             Function func;
             func.name = "jr_ra_return";
@@ -1820,6 +1866,136 @@ void register_code_generator_tests()
                      "unresolved JR should hand the dynamic target back through ctx->pc");
             t.IsTrue(generated.find("PS2Runtime::GuestBranchKind::IndirectJump") != std::string::npos,
                      "unresolved non-RA JR should use indirect-jump diagnostics");
+        });
+
+        tc.Run("JR jump table bound check far above the table load still resolves", [](TestCase &t) {
+            // Mana Khemia 0x1C1D90: SLTIU on the case index sits ~50 instructions above the table load,
+            // past a long scheduled prologue. Missing it left the JR unresolved, and a case target in the
+            // next function had no entry, so the game stopped when it took that case.
+            constexpr uint32_t tableAddress = 0x00200000u;
+            constexpr uint32_t start = 0x1700u;
+            constexpr uint32_t prologueLength = 60u;
+
+            Function func;
+            func.name = "jr_far_bound_jump_table";
+            func.start = start;
+            func.isRecompiled = true;
+            func.isStub = false;
+
+            std::vector<Instruction> instructions;
+            uint32_t address = start;
+            auto push = [&](Instruction inst)
+            {
+                inst.address = address;
+                address += 4u;
+                instructions.push_back(inst);
+            };
+
+            Instruction index{}; // addiu t4, a1, -4
+            index.opcode = OPCODE_ADDIU;
+            index.rs = 5;
+            index.rt = 12;
+            index.immediate = 0xFFFCu;
+            index.simmediate = 0xFFFFFFFCu;
+            index.modificationInfo.modifiesGPR = true;
+            push(index);
+
+            Instruction bound{}; // sltiu t5, t4, 3
+            bound.opcode = OPCODE_SLTIU;
+            bound.rs = 12;
+            bound.rt = 13;
+            bound.immediate = 3u;
+            bound.simmediate = 3u;
+            bound.modificationInfo.modifiesGPR = true;
+            push(bound);
+
+            for (uint32_t i = 0; i < prologueLength; ++i)
+                push(makeNop(0));
+
+            Instruction lui{}; // lui t6, hi(table)
+            lui.opcode = OPCODE_LUI;
+            lui.rt = 14;
+            lui.immediate = static_cast<uint16_t>(tableAddress >> 16);
+            push(lui);
+
+            Instruction sll{}; // sll t7, t4, 2
+            sll.opcode = OPCODE_SPECIAL;
+            sll.function = SPECIAL_SLL;
+            sll.rd = 15;
+            sll.rt = 12;
+            sll.sa = 2;
+            push(sll);
+
+            Instruction addiu{}; // addiu t6, t6, lo(table)
+            addiu.opcode = OPCODE_ADDIU;
+            addiu.rs = 14;
+            addiu.rt = 14;
+            addiu.immediate = static_cast<uint16_t>(tableAddress & 0xFFFFu);
+            addiu.simmediate = addiu.immediate;
+            push(addiu);
+
+            Instruction addu{}; // addu t7, t7, t6
+            addu.opcode = OPCODE_SPECIAL;
+            addu.function = SPECIAL_ADDU;
+            addu.rs = 15;
+            addu.rt = 14;
+            addu.rd = 15;
+            push(addu);
+
+            Instruction lw{}; // lw t7, 0(t7)
+            lw.opcode = OPCODE_LW;
+            lw.rs = 15;
+            lw.rt = 15;
+            push(lw);
+
+            const uint32_t jrAddress = address;
+            push(makeJr(0, 15));
+            push(makeNop(0));
+            const uint32_t case0 = address;
+            push(makeNop(0));
+            const uint32_t case1 = address;
+            push(makeNop(0));
+            const uint32_t case2 = address;
+            push(makeNop(0));
+            func.end = address;
+
+            std::vector<uint8_t> table(12u);
+            const uint32_t targets[3] = {case0, case1, case2};
+            std::memcpy(table.data(), targets, sizeof(targets));
+            Section rodata{};
+            rodata.name = ".rodata";
+            rodata.address = tableAddress;
+            rodata.size = static_cast<uint32_t>(table.size());
+            rodata.isData = true;
+            rodata.isReadOnly = true;
+            rodata.data = table.data();
+
+            const std::vector<Symbol> symbols;
+            const std::vector<Section> sections{rodata}; // CodeGenerator keeps a reference to these
+            CodeGenerator gen(symbols, sections);
+            CodeGenerator::AnalysisResult analysis = gen.collectInternalBranchTargets(func, instructions);
+            t.IsTrue(analysis.jumpTableTargets.contains(jrAddress),
+                     "a bound check above a long prologue should still size the jump table");
+            if (analysis.jumpTableTargets.contains(jrAddress))
+            {
+                t.Equals(analysis.jumpTableTargets.at(jrAddress).size(), static_cast<size_t>(3),
+                         "all three table targets should be resolved");
+            }
+
+            // Once the index register is overwritten after the compare, that bound no longer applies.
+            std::vector<Instruction> clobbered = instructions;
+            Instruction overwrite{}; // addiu t4, zero, 9
+            overwrite.address = clobbered[2].address;
+            overwrite.opcode = OPCODE_ADDIU;
+            overwrite.rs = 0;
+            overwrite.rt = 12;
+            overwrite.immediate = 9u;
+            overwrite.simmediate = 9u;
+            overwrite.modificationInfo.modifiesGPR = true;
+            clobbered[2] = overwrite;
+            CodeGenerator::AnalysisResult clobberedAnalysis = gen.collectInternalBranchTargets(func, clobbered);
+            t.IsFalse(clobberedAnalysis.jumpTableTargets.contains(jrAddress),
+                      "a compare on an overwritten index must not be taken as the table bound");
         });
 
         tc.Run("configured jump table addresses drive JR dispatch targets", [](TestCase &t) {

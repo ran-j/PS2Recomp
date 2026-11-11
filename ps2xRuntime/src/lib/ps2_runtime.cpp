@@ -5,6 +5,7 @@
 #include "game_overrides.h"
 #include "ps2_runtime_macros.h"
 #include "runtime/gs/gs_frontend.h"
+#include "runtime/gs/gs_cpu_backend.h"
 #include "runtime/ee_scheduler.h"
 #include "ThreadNaming.h"
 #include "Kernel/Stubs/Audio.h"
@@ -12,6 +13,7 @@
 #include "Kernel/Stubs/MPEG.h"
 #include "ps2_host_backend.h"
 #include "ps2_iop_host.h"
+#include "ps2_audio_stream.h"
 #include "ps2x/iop/iop_subsystem.h"
 
 #include <iostream>
@@ -23,6 +25,8 @@
 #include <limits>
 #include <chrono>
 #include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <thread>
 #include <unordered_map>
 #include <sstream>
@@ -387,6 +391,54 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
     static std::vector<uint8_t> s_uploadBuffer(DEFAULT_FB_SIZE, 0u);
 
     const uint64_t currentTick = rt->eeScheduler().currentVSyncTick();
+    // PS2X_PERF_LOG=1 prints guest vblanks/s against host frames/s every 5 s, so a
+    // scripted run's log shows where the game drops below full speed. The same line counts
+    // all-black frames latched for display (a black flash a player reports is one of these)
+    // and the host audio ring's underruns and latency drops (audible as skips or crackle).
+    static const bool s_perfLog = std::getenv("PS2X_PERF_LOG") != nullptr;
+    static uint32_t s_blackFrames = 0u;
+    static uint64_t s_lastBlackTick = 0u;
+    static uint32_t s_lastBlackDisplayFbp = 0u;
+    static uint32_t s_lastBlackSourceFbp = 0u;
+    {
+        if (s_perfLog)
+        {
+            static auto s_lastReport = std::chrono::steady_clock::now();
+            static uint64_t s_lastTick = currentTick;
+            static uint32_t s_hostFrames = 0u;
+            static uint64_t s_lastUnderruns = 0u;
+            static uint64_t s_lastAudioDrops = 0u;
+            static uint64_t s_lastPushed = 0u;
+            ++s_hostFrames;
+            const auto now = std::chrono::steady_clock::now();
+            const double elapsed = std::chrono::duration<double>(now - s_lastReport).count();
+            if (elapsed >= 5.0)
+            {
+                const uint64_t underruns = spu2AudioUnderruns();
+                const uint64_t audioDrops = spu2AudioLatencyDroppedFrames();
+                const uint64_t pushed = spu2AudioPushedFrames();
+                std::fprintf(stderr,
+                             "[perf] vsync=%llu guest_vps=%.1f host_fps=%.1f black_frames=%u last_black(tick=%llu dispfbp=0x%x srcfbp=0x%x) audio_rate=%.0f audio_underruns=+%llu audio_dropped_frames=+%llu\n",
+                             static_cast<unsigned long long>(currentTick),
+                             static_cast<double>(currentTick - s_lastTick) / elapsed,
+                             static_cast<double>(s_hostFrames) / elapsed,
+                             s_blackFrames,
+                             static_cast<unsigned long long>(s_lastBlackTick),
+                             s_lastBlackDisplayFbp,
+                             s_lastBlackSourceFbp,
+                             static_cast<double>(pushed - s_lastPushed) / elapsed,
+                             static_cast<unsigned long long>(underruns - s_lastUnderruns),
+                             static_cast<unsigned long long>(audioDrops - s_lastAudioDrops));
+                s_lastReport = now;
+                s_lastTick = currentTick;
+                s_hostFrames = 0u;
+                s_blackFrames = 0u;
+                s_lastUnderruns = underruns;
+                s_lastAudioDrops = audioDrops;
+                s_lastPushed = pushed;
+            }
+        }
+    }
     const bool needsLatch = !s_hasLatchedInitialFrame || currentTick != s_lastPresentationTick;
     if (needsLatch)
     {
@@ -423,6 +475,33 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
         s_lastHeight = outHeight;
         s_hasUploadedFrame = true;
         return;
+    }
+
+    if (s_perfLog && needsLatch && !s_scratch.empty() && width != 0u && height != 0u)
+    {
+        bool allBlack = true;
+        const size_t rowBytes = static_cast<size_t>(width) * 4u;
+        for (uint32_t y = 0; y < height && allBlack; ++y)
+        {
+            const uint8_t *row = s_scratch.data() + static_cast<size_t>(y) * rowBytes;
+            if (static_cast<size_t>(y) * rowBytes + rowBytes > s_scratch.size())
+                break;
+            for (uint32_t x = 0; x < width; ++x)
+            {
+                if (row[x * 4u] != 0u || row[x * 4u + 1u] != 0u || row[x * 4u + 2u] != 0u)
+                {
+                    allBlack = false;
+                    break;
+                }
+            }
+        }
+        if (allBlack)
+        {
+            ++s_blackFrames;
+            s_lastBlackTick = currentTick;
+            s_lastBlackDisplayFbp = displayFbp;
+            s_lastBlackSourceFbp = sourceFbp;
+        }
     }
 
     PS2_IF_AGRESSIVE_LOGS({
@@ -585,6 +664,11 @@ bool PS2Runtime::stopIopModule(int32_t moduleId, int32_t *result)
 ps2x::iop::RpcAbi PS2Runtime::selectIopRpcAbi(const ps2x::iop::RpcAbiRequest &request) const
 {
     return m_iopSubsystem->selectRpcAbi(request);
+}
+
+int32_t PS2Runtime::findIopModuleByAddress(uint32_t iopAddress) const noexcept
+{
+    return m_iopSubsystem->findModuleByAddress(iopAddress);
 }
 
 bool PS2Runtime::canBindIopRpc(uint32_t sid) const noexcept
@@ -1181,7 +1265,7 @@ PS2Runtime::MissingFunctionPolicy PS2Runtime::missingFunctionPolicy() const
 
 void PS2Runtime::resetMissingFunctionReportOnce()
 {
-    m_missingFunctionReported.store(false, std::memory_order_release);
+    m_missingFunctionReports.store(0u, std::memory_order_release);
 }
 
 void PS2Runtime::reportMissingFunction(uint8_t *rdram,
@@ -1192,7 +1276,12 @@ void PS2Runtime::reportMissingFunction(uint8_t *rdram,
                                        const char *debugName)
 {
     const MissingFunctionPolicy policy = missingFunctionPolicy();
-    const bool firstReport = !m_missingFunctionReported.exchange(true, std::memory_order_acq_rel);
+    // One line per distinct failure is what a play log needs; a game that keeps hitting missing
+    // targets after the first would otherwise hide every later one, so report the first few.
+    constexpr uint32_t kMaxMissingFunctionReports = 16u;
+    const uint32_t reportIndex = m_missingFunctionReports.fetch_add(1u, std::memory_order_acq_rel);
+    const bool firstReport = reportIndex < kMaxMissingFunctionReports;
+    const bool breakOnce = reportIndex == 0u;
 
     const uint32_t pc = ctx->pc;
     const uint32_t ra = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0));
@@ -1324,7 +1413,7 @@ void PS2Runtime::reportMissingFunction(uint8_t *rdram,
         }
     }
 
-    if (firstReport && policy == MissingFunctionPolicy::BreakOnce)
+    if (breakOnce && policy == MissingFunctionPolicy::BreakOnce)
     {
 #if defined(_MSC_VER)
         __debugbreak();
@@ -2013,6 +2102,23 @@ uint32_t PS2Runtime::reserveAsyncCallbackStack(uint32_t size, uint32_t alignment
     return top - 0x10u;
 }
 
+void PS2Runtime::excludeAsyncCallbackStackRange(uint32_t base, uint32_t end)
+{
+    std::lock_guard<std::mutex> lock(m_asyncCallbackStackMutex);
+    if (end <= m_asyncCallbackStackFloor || base >= m_asyncCallbackStackTop)
+    {
+        return;
+    }
+    if (base < m_asyncCallbackStackFloor)
+    {
+        std::cerr << "[runtime] stack range 0x" << std::hex << base << "-0x" << end
+                  << " covers the async callback stack area starting at 0x" << m_asyncCallbackStackFloor
+                  << std::dec << "; callbacks may corrupt it" << std::endl;
+        return;
+    }
+    m_asyncCallbackStackTop = base & ~(kGuestHeapDefaultAlignment - 1u);
+}
+
 uint8_t PS2Runtime::Load8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 {
     try
@@ -2363,6 +2469,19 @@ void PS2Runtime::run()
     UnloadImage(blank);
 
     std::atomic<bool> gameThreadFinished{false};
+
+    // Rasterize on a GS thread so the EE keeps running while primitives are drawn; PS2X_GS_ASYNC=0 keeps
+    // drawing on the game thread.
+    {
+        const char *asyncSetting = std::getenv("PS2X_GS_ASYNC");
+        if (!asyncSetting || asyncSetting[0] != '0')
+        {
+            auto backend = std::make_unique<GSCpuBackend>();
+            backend->SetAsync(true);
+            backend->SetDisplayRegisters(&m_memory.gs());
+            m_gs.setRasterBackend(std::move(backend));
+        }
+    }
 
     std::thread gameThread([&]()
                            {

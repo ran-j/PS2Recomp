@@ -192,12 +192,12 @@ namespace GSMem
     }};
 
     // this is going to be massive (an entire page of addess lookups)
-    static C32PageLookupTable  PageTableC32{ };
-    static Z32PageLookupTableT PageTableZ32{ };
-    static C16PageLookupTable  PageTableC16{ };
-    static C16SPageLookupTable PageTableC16S{ };
-    static Z16PageLookupTable  PageTableZ16{ };
-    static Z16SPageLookupTable PageTableZ16S{ };
+    C32PageLookupTable  PageTableC32{ };
+    Z32PageLookupTableT PageTableZ32{ };
+    C16PageLookupTable  PageTableC16{ };
+    C16SPageLookupTable PageTableC16S{ };
+    Z16PageLookupTable  PageTableZ16{ };
+    Z16SPageLookupTable PageTableZ16S{ };
     static P8PageLookupTable   PageTableP8{ };
     static P4PageLookupTable   PageTableP4{ };
 
@@ -252,6 +252,187 @@ namespace GSMem
             return PixelStorageTraits<Z16S>::Read(PageTableZ16S, data, bp, bw, x, y, &cache);
         default:
             return 0u;
+        }
+    }
+
+    namespace
+    {
+        template <PixelStorageMode psm, const auto& table>
+        __attribute__((flatten)) u32 FetchTexel(TexturePageCache& cache, const u8* data, u32 bp, u32 bw, u32 x, u32 y)
+        {
+            return PixelStorageTraits<psm>::Read(table, data, bp, bw, x, y, &cache);
+        }
+
+        // The address arithmetic of PixelStorageTraits::Read/Write, without the access.
+        template <PixelStorageMode psm, const auto& table>
+        u32 PixelOffset(u32 bp, u32 bw, u32 x, u32 y)
+        {
+            using Traits = PixelStorageTraits<psm>;
+            const u32 pixel_addr = Traits::Address(table, bp, bw, x, y);
+            const u32 bits = pixel_addr * UnpackedBitWidth(psm) + Traits::BitOffset();
+            return (bits / 8) & (MEMORY_SIZE - sizeof(typename Traits::PackedT));
+        }
+
+        u32 FetchNothing(TexturePageCache&, const u8*, u32, u32, u32, u32)
+        {
+            return 0u;
+        }
+
+        template <PixelStorageMode psm, const auto& table>
+        __attribute__((flatten)) void FetchQuad(TexturePageCache& cache, const u8* data, u32 bp, u32 bw, u32 u0, u32 u1, u32 v0, u32 v1, u32* out)
+        {
+            using Traits = PixelStorageTraits<psm>;
+            constexpr Extent2D extent = Traits::PageExtent();
+            const u32 x = u0 % extent.x;
+            const u32 y = v0 % extent.y;
+            if (u1 == u0 + 1u && v1 == v0 + 1u && x + 1u < extent.x && y + 1u < extent.y)
+            {
+                // Neighbours within one page tile share the page lookup; a base pointer that is not page
+                // aligned can still spread them over two 8 KB pages, so check before resolving once.
+                const auto& block = table[bp % Traits::BlocksPerPage()];
+                const u32 page = static_cast<u32>(Traits::PageId(bp, bw, u0, v0)) * static_cast<u32>(Traits::PixelsPerPage());
+                const u32 addresses[4] = {page + block[y][x], page + block[y][x + 1u], page + block[y + 1u][x], page + block[y + 1u][x + 1u]};
+                u32 bits[4];
+                u32 bytes[4];
+                for (int i = 0; i < 4; ++i)
+                {
+                    bits[i] = static_cast<u32>(addresses[i] * UnpackedBitWidth(psm) + Traits::BitOffset());
+                    bytes[i] = (bits[i] / 8) & (MEMORY_SIZE - sizeof(typename Traits::PackedT));
+                }
+                const u32 page0 = bytes[0] / TexturePageCache::kPageSize;
+                if (bytes[1] / TexturePageCache::kPageSize == page0 && bytes[2] / TexturePageCache::kPageSize == page0 &&
+                    bytes[3] / TexturePageCache::kPageSize == page0)
+                {
+                    // The other three reads would hit the page without changing anything but the recorded reads.
+                    const u8* pageBytes = cache.Resolve(data, bytes[0]) - (bytes[0] % TexturePageCache::kPageSize);
+                    cache.ResolveAgain(3u);
+                    for (int i = 0; i < 4; ++i)
+                    {
+                        typename Traits::PackedT v;
+                        std::memcpy(&v, pageBytes + (bytes[i] % TexturePageCache::kPageSize), sizeof(v));
+                        switch (psm)
+                        {
+                        case C24:
+                        case Z24:
+                            out[i] = v & 0x00FFFFFFu;
+                            break;
+                        case P4:
+                        case P4HL:
+                        case P4HH:
+                            out[i] = (v >> (bits[i] % 8)) & 0x0Fu;
+                            break;
+                        default:
+                            out[i] = v;
+                            break;
+                        }
+                    }
+                    return;
+                }
+            }
+            out[0] = Traits::Read(table, data, bp, bw, u0, v0, &cache);
+            out[1] = Traits::Read(table, data, bp, bw, u1, v0, &cache);
+            out[2] = Traits::Read(table, data, bp, bw, u0, v1, &cache);
+            out[3] = Traits::Read(table, data, bp, bw, u1, v1, &cache);
+        }
+
+        void FetchNoQuad(TexturePageCache&, const u8*, u32, u32, u32, u32, u32, u32, u32* out)
+        {
+            out[0] = out[1] = out[2] = out[3] = 0u;
+        }
+    }
+
+    TextureFetchFn TextureFetcher(u32 psm)
+    {
+        switch (static_cast<PixelStorageMode>(psm & 0x3Fu))
+        {
+        case C32:
+            return FetchTexel<C32, PageTableC32>;
+        case C24:
+            return FetchTexel<C24, PageTableC32>;
+        case C16:
+            return FetchTexel<C16, PageTableC16>;
+        case C16S:
+            return FetchTexel<C16S, PageTableC16S>;
+        case P8:
+            return FetchTexel<P8, PageTableP8>;
+        case P4:
+            return FetchTexel<P4, PageTableP4>;
+        case P8H:
+            return FetchTexel<P8H, PageTableC32>;
+        case P4HL:
+            return FetchTexel<P4HL, PageTableC32>;
+        case P4HH:
+            return FetchTexel<P4HH, PageTableC32>;
+        case Z32:
+            return FetchTexel<Z32, PageTableZ32>;
+        case Z24:
+            return FetchTexel<Z24, PageTableZ32>;
+        case Z16:
+            return FetchTexel<Z16, PageTableZ16>;
+        case Z16S:
+            return FetchTexel<Z16S, PageTableZ16S>;
+        default:
+            return FetchNothing;
+        }
+    }
+
+    TextureQuadFetchFn TextureQuadFetcher(u32 psm)
+    {
+        switch (static_cast<PixelStorageMode>(psm & 0x3Fu))
+        {
+        case C32:
+            return FetchQuad<C32, PageTableC32>;
+        case C24:
+            return FetchQuad<C24, PageTableC32>;
+        case C16:
+            return FetchQuad<C16, PageTableC16>;
+        case C16S:
+            return FetchQuad<C16S, PageTableC16S>;
+        case P8:
+            return FetchQuad<P8, PageTableP8>;
+        case P4:
+            return FetchQuad<P4, PageTableP4>;
+        case P8H:
+            return FetchQuad<P8H, PageTableC32>;
+        case P4HL:
+            return FetchQuad<P4HL, PageTableC32>;
+        case P4HH:
+            return FetchQuad<P4HH, PageTableC32>;
+        case Z32:
+            return FetchQuad<Z32, PageTableZ32>;
+        case Z24:
+            return FetchQuad<Z24, PageTableZ32>;
+        case Z16:
+            return FetchQuad<Z16, PageTableZ16>;
+        case Z16S:
+            return FetchQuad<Z16S, PageTableZ16S>;
+        default:
+            return FetchNoQuad;
+        }
+    }
+
+    PixelOffsetFn TargetPixelOffset(u32 psm)
+    {
+        switch (static_cast<PixelStorageMode>(psm & 0x3Fu))
+        {
+        case C32:
+            return PixelOffset<C32, PageTableC32>;
+        case C24:
+            return PixelOffset<C24, PageTableC32>;
+        case C16:
+            return PixelOffset<C16, PageTableC16>;
+        case C16S:
+            return PixelOffset<C16S, PageTableC16S>;
+        case Z32:
+            return PixelOffset<Z32, PageTableZ32>;
+        case Z24:
+            return PixelOffset<Z24, PageTableZ32>;
+        case Z16:
+            return PixelOffset<Z16, PageTableZ16>;
+        case Z16S:
+            return PixelOffset<Z16S, PageTableZ16S>;
+        default:
+            return nullptr;
         }
     }
 

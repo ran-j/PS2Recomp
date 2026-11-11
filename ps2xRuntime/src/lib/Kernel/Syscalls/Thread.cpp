@@ -112,7 +112,8 @@ namespace ps2_syscalls
             const int priority = static_cast<int>(getRegU32(ctx, 5));
             int oldPriority = 0;
             const int result = ee.changePriority(id, priority, interruptSafe, oldPriority);
-            setReturnS32(ctx, result);
+            // The EE kernel returns the previous priority; middleware (CRI ADX) restores it after locking.
+            setReturnS32(ctx, result == KE_OK ? oldPriority : result);
             ee.transferIfRequested(interruptSafe);
         }
 
@@ -313,16 +314,24 @@ namespace ps2_syscalls
     void SuspendThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         EeScheduler &ee = scheduler(rdram, ctx, runtime);
-        const int result = ee.suspendThread(static_cast<int>(getRegU32(ctx, 4)), false);
-        setReturnS32(ctx, result);
+        int id = static_cast<int>(getRegU32(ctx, 4));
+        if (id == 0)
+        {
+            id = ee.currentThreadId();
+        }
+        // The EE kernel returns the thread id on success; CRI middleware checks for it.
+        const int result = ee.suspendThread(id, false);
+        setReturnS32(ctx, result == KE_OK ? id : result);
         ee.transferIfRequested(false);
     }
 
     void ResumeThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         EeScheduler &ee = scheduler(rdram, ctx, runtime);
-        const int result = ee.resumeThread(static_cast<int>(getRegU32(ctx, 4)), false);
-        setReturnS32(ctx, result);
+        const int id = static_cast<int>(getRegU32(ctx, 4));
+        // CRI Sofdec only wakes its decoder after ResumeThread(t) == t, as on the real kernel.
+        const int result = ee.resumeThread(id, false);
+        setReturnS32(ctx, result == KE_OK ? id : result);
         ee.transferIfRequested(false);
     }
 

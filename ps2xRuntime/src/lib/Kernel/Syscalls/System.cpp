@@ -531,6 +531,12 @@ namespace ps2_syscalls
         }
 
         scheduler.setupCurrentThread(initialStack, stackSize, getRegU32(ctx, 28));
+        if (stack != 0u && stackSize != 0u && stackSize < PS2_RAM_SIZE)
+        {
+            // crt0 often places the main stack in the top of RAM, where callback stacks are carved from.
+            const uint32_t stackBase = stack == 0xFFFFFFFFu ? PS2_RAM_SIZE - stackSize : stack;
+            runtime->excludeAsyncCallbackStackRange(stackBase, stackBase + stackSize);
+        }
         setReturnU32(ctx, sp);
     }
 

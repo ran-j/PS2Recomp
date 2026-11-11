@@ -380,11 +380,13 @@ add_library(ps2_runtime STATIC
     src/lib/gs/ps2_gif_arbiter.cpp
     src/lib/ps2_audio.cpp
     src/lib/ps2_audio_vag.cpp
+    src/lib/ps2_audio_stream.cpp
     src/lib/gs/ps2_gs_memory.cpp
     src/lib/gs/gs_frontend.cpp
     src/lib/gs/gs_cpu_backend.cpp
     src/lib/ps2_iop_host.cpp
     src/lib/ps2_memory.cpp
+    src/lib/ps2_ipu.cpp
     src/lib/ps2_pad.cpp
     src/lib/ps2_rom_device.cpp
     src/lib/ps2_vfs.cpp

@@ -203,6 +203,30 @@ void register_ps2_sif_rpc_tests()
                      "SifInitRpc must not reboot or reset the IOP");
         });
 
+        tc.Run("Guest checkpoints run the IOP in bounded batches", [](TestCase &t)
+        {
+            TestEnv env;
+            EeScheduler &scheduler = env.runtime.eeScheduler();
+            const uint64_t start = env.runtime.iopDebugSnapshot().emulatorCycles;
+
+            constexpr uint32_t kStep = EeScheduler::kGeneratedCheckpointCycles;
+            constexpr uint64_t kStepsPerBatch = EeScheduler::kIopBatchEeCycles / kStep;
+            for (uint64_t i = 0; i + 1u < kStepsPerBatch; ++i)
+                (void)scheduler.checkpointDue(kStep);
+            t.Equals(env.runtime.iopDebugSnapshot().emulatorCycles, start,
+                     "IOP should not run for every few dozen guest cycles");
+
+            (void)scheduler.checkpointDue(kStep);
+            t.Equals(env.runtime.iopDebugSnapshot().emulatorCycles, start + EeScheduler::kIopBatchEeCycles / 8u,
+                     "IOP must catch up to the EE once a batch has accumulated");
+
+            (void)scheduler.checkpointDue(kStep);
+            scheduler.accountCycles(8u);
+            t.Equals(env.runtime.iopDebugSnapshot().emulatorCycles,
+                     start + (EeScheduler::kIopBatchEeCycles + kStep + 8u) / 8u,
+                     "accountCycles must run the IOP up to the current EE time");
+        });
+
         tc.Run("SifLoadModule validates ROM modules and activates their HLE service", [](TestCase &t)
         {
             TestEnv env;

@@ -1,9 +1,12 @@
 #include "MiniTest.h"
+#include <algorithm>
+#include <cmath>
 #include "runtime/ps2_memory.h"
 #include "ps2_runtime.h"
 #include "ps2_stubs.h"
 #include "ps2_syscalls.h"
 #include "runtime/gs/gs_frontend.h"
+#include "runtime/gs/gs_cpu_backend.h"
 #include "runtime/ee_scheduler.h"
 #include "runtime/gs/ps2_gs_memory.h"
 #include "runtime/gs/ps2_gs_psmct32.h"
@@ -158,9 +161,18 @@ namespace
         runtime->requestStop();
     }
 
+    // Encodes the libgraph sceGsLoadImage register fields the runtime stubs decode.
     void writeGsImageTest(uint8_t *rdram, uint32_t addr, const GsImageMem &image)
     {
-        std::memcpy(rdram + addr, &image, sizeof(image));
+        uint64_t q[12] = {};
+        q[2] = (static_cast<uint64_t>(image.vram_addr) << 32) | (static_cast<uint64_t>(image.vram_width) << 48) |
+               (static_cast<uint64_t>(image.psm) << 56);
+        q[3] = 0x50u;
+        q[4] = (static_cast<uint64_t>(image.x) << 32) | (static_cast<uint64_t>(image.y) << 48);
+        q[5] = 0x51u;
+        q[6] = static_cast<uint64_t>(image.width) | (static_cast<uint64_t>(image.height) << 32);
+        q[7] = 0x52u;
+        std::memcpy(rdram + addr, q, sizeof(q));
     }
 
     void writeGsImageTest(std::vector<uint8_t> &rdram, uint32_t addr, const GsImageMem &image)
@@ -350,6 +362,17 @@ namespace
         return readReferencePSMCT32Pixel(vram, frameBaseToBlock(fbp), fbw, x, y);
     }
 
+    // Sets libgraph's CRT parameters the way the game does, through the HLE sceGsResetGraph.
+    void resetGraphForTest(std::vector<uint8_t> &rdram, PS2Runtime &runtime, uint32_t interlace, uint32_t ffmode)
+    {
+        R5900Context ctx{};
+        setRegU32(ctx, 4, 0u);
+        setRegU32(ctx, 5, interlace);
+        setRegU32(ctx, 6, 2u); // NTSC
+        setRegU32(ctx, 7, ffmode);
+        ps2_stubs::sceGsResetGraph(rdram.data(), &ctx, &runtime);
+    }
+
     void expectGuestHeapReusable(TestCase &t, PS2Runtime &runtime, const char *message)
     {
         const uint32_t expectedBase = runtime.guestHeapBase();
@@ -524,6 +547,7 @@ void register_ps2_gs_tests()
             t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
 
             std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            resetGraphForTest(rdram, runtime, 0u, 0u);
             constexpr uint32_t kEnvAddr = 0x4000u;
             constexpr uint32_t kDispEnvSize = 40u;
             constexpr uint32_t kDBuffSize = 0x330u;
@@ -557,7 +581,10 @@ void register_ps2_gs_tests()
             std::memcpy(&xyoffset10Addr, rdram.data() + kEnvAddr + kXYOffset1AddrOffset, sizeof(xyoffset10Addr));
 
             t.Equals((dispfb0 >> 9) & 0x3Fu, 10ull, "dbuff display env should seed FBW from width");
-            t.Equals((display0 >> 32) & 0x0FFFull, 639ull, "dbuff display env should seed DW from width");
+            t.Equals((display0 >> 32) & 0x0FFFull, 2559ull, "libgraph stretches DW to 4 x 640 VCK");
+            t.Equals((display0 >> 23) & 0xFull, 3ull, "MAGH 3 maps the 2560 VCK back to 640 pixels");
+            t.Equals(display0 & 0xFFFull, 636ull, "NTSC DX");
+            t.Equals((display0 >> 12) & 0x7FFull, 25ull, "progressive NTSC DY");
             t.Equals((display0 >> 44) & 0x07FFull, 447ull, "dbuff display env should seed DH from height");
             t.Equals((frame10 >> 16) & 0x3Full, 10ull, "dbuff draw env should seed FRAME FBW from width");
             t.Equals(frame10Addr, 0x4Cull, "dbuff draw env should seed FRAME_1 register id");
@@ -579,8 +606,89 @@ void register_ps2_gs_tests()
 
             t.Equals(runtime.memory().gs().dispfb1 & 0x1FFull, 151ull,
                      "sceGsSwapDBuffDc should program GS to the selected display page");
-            t.Equals((runtime.memory().gs().display1 >> 32) & 0x0FFFull, 639ull,
+            t.Equals((runtime.memory().gs().display1 >> 32) & 0x0FFFull, 2559ull,
                      "sceGsSwapDBuffDc should preserve the display width from the seeded env");
+            resetGraphForTest(rdram, runtime, 1u, 1u);
+        });
+
+        tc.Run("sceGsSetDefDispEnv writes the whole display env like libgraph", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            constexpr uint32_t kEnvAddr = 0x4000u;
+            std::memset(rdram.data() + kEnvAddr, 0xCD, sizeof(GsDispEnvMem));
+
+            // Mana Khemia: ResetGraph(0, 1, NTSC, 0) then SetDefDispEnv(disp, psm, 640, 448, 0, 0).
+            resetGraphForTest(rdram, runtime, 1u, 0u);
+            R5900Context ctx{};
+            setRegU32(ctx, 4, kEnvAddr);
+            setRegU32(ctx, 5, GS_PSM_CT24);
+            setRegU32(ctx, 6, 640u);
+            setRegU32(ctx, 7, 448u);
+            ps2_stubs::sceGsSetDefDispEnv(rdram.data(), &ctx, &runtime);
+
+            GsDispEnvMem env{};
+            std::memcpy(&env, rdram.data() + kEnvAddr, sizeof(env));
+            t.Equals(env.pmode, 0x66ull, "PMODE enables read circuit 2 only");
+            t.Equals(env.smode2, 1ull, "SMODE2: interlaced, field mode");
+            t.Equals(env.dispfb, (static_cast<uint64_t>(GS_PSM_CT24) << 15) | (10ull << 9), "DISPFB: page 0, FBW 10");
+            t.Equals(env.display, 636ull | (50ull << 12) | (3ull << 23) | (2559ull << 32) | (447ull << 44),
+                     "DISPLAY: interlaced NTSC position and 4x horizontal magnification");
+            t.Equals(env.bgcolor, 0ull, "BGCOLOR is black");
+            resetGraphForTest(rdram, runtime, 1u, 1u);
+        });
+
+        tc.Run("sceGsSetDefDBuffDc keeps the second frame buffer out of the Z buffer", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            constexpr uint32_t kEnvAddr = 0x4000u;
+
+            // 640x448 CT24: 140 pages per buffer, so libgraph puts buffer 1 at page 140 and Z at 280.
+            R5900Context ctx{};
+            setRegU32(ctx, 4, kEnvAddr);
+            setRegU32(ctx, 5, GS_PSM_CT24);
+            setRegU32(ctx, 6, 640u);
+            setRegU32(ctx, 7, 448u);
+            setRegU32(ctx, 10, 1u); // clear
+            ps2_stubs::sceGsSetDefDBuffDc(rdram.data(), &ctx, &runtime);
+
+            GsDBuffDcMem db{};
+            std::memcpy(&db, rdram.data() + kEnvAddr, sizeof(db));
+            t.Equals(db.draw11.zbuf1.value & 0x1FFull, 280ull, "Z should follow both frame buffers");
+            // libgraph: SwapDBuffDc(0) shows page 0 (disp[0]) and draws through draw0x into page 140.
+            t.Equals(db.disp[0].dispfb & 0x1FFull, 0ull, "disp[0] shows page 0");
+            t.Equals(db.disp[1].dispfb & 0x1FFull, 140ull, "disp[1] shows the second buffer");
+            t.Equals(db.draw01.frame1.value & 0x1FFull, 140ull, "draw01 renders into the second buffer");
+            t.Equals(db.draw02.frame2.value & 0x1FFull, 140ull, "draw02 renders into the second buffer");
+            t.Equals(db.draw11.frame1.value & 0x1FFull, 0ull, "draw11 renders into page 0");
+            t.Equals(db.draw12.frame2.value & 0x1FFull, 0ull, "draw12 renders into page 0");
+            t.Equals(db.clear1.prim.value, static_cast<uint64_t>(GS_PRIM_SPRITE), "both clears are context-1 sprites");
+        });
+
+        tc.Run("sceGsSetDefDBuffDc shares one buffer in interlaced field mode", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            constexpr uint32_t kEnvAddr = 0x4000u;
+            resetGraphForTest(rdram, runtime, 1u, 0u);
+
+            R5900Context ctx{};
+            setRegU32(ctx, 4, kEnvAddr);
+            setRegU32(ctx, 5, GS_PSM_CT24);
+            setRegU32(ctx, 6, 640u);
+            setRegU32(ctx, 7, 224u);
+            ps2_stubs::sceGsSetDefDBuffDc(rdram.data(), &ctx, &runtime);
+
+            GsDBuffDcMem db{};
+            std::memcpy(&db, rdram.data() + kEnvAddr, sizeof(db));
+            t.Equals(db.disp[1].dispfb & 0x1FFull, 0ull, "field mode leaves disp[1] on page 0");
+            t.Equals(db.draw01.frame1.value & 0x1FFull, 0ull, "field mode leaves draw01 on page 0");
+            t.Equals(db.draw01.zbuf1.value & 0x1FFull, 70ull, "Z follows the single 70-page buffer");
+            resetGraphForTest(rdram, runtime, 1u, 1u);
         });
 
         tc.Run("sceGsSetDefDBuffDc seeds a clear packet and swap clears the draw buffer", [](TestCase &t)
@@ -594,11 +702,11 @@ void register_ps2_gs_tests()
             constexpr uint32_t kClear0Offset = 0x160u;
             constexpr uint32_t kTestAAddrOffset = kClear0Offset + 0x08u;
             constexpr uint32_t kPrimAddrOffset = kClear0Offset + 0x18u;
-            constexpr uint32_t kRgbaqOffset = kClear0Offset + 0x20u;
             constexpr uint32_t kRgbaqAddrOffset = kClear0Offset + 0x28u;
             constexpr uint32_t kXyz2AAddrOffset = kClear0Offset + 0x38u;
             constexpr uint32_t kXyz2BAddrOffset = kClear0Offset + 0x48u;
             constexpr uint32_t kTestBAddrOffset = kClear0Offset + 0x58u;
+            constexpr uint32_t kClear1RgbaqOffset = 0x2D0u + 0x20u;
             constexpr uint32_t kClearColor = 0x80402010u;
             constexpr uint32_t kStackAddr = 0x900u;
             const uint32_t kZTest = 2u;
@@ -609,10 +717,10 @@ void register_ps2_gs_tests()
             setRegU32(ctx, 5, 0u);
             setRegU32(ctx, 6, 640u);
             setRegU32(ctx, 7, 448u);
+            setRegU32(ctx, 8, kZTest);
+            setRegU32(ctx, 10, kEnableClear);
             setRegU32(ctx, 29, kStackAddr);
             std::memset(rdram.data() + kEnvAddr, 0xCD, kDBuffSize);
-            std::memcpy(rdram.data() + kStackAddr + 16u, &kZTest, sizeof(kZTest));
-            std::memcpy(rdram.data() + kStackAddr + 24u, &kEnableClear, sizeof(kEnableClear));
             std::memset(runtime.memory().getGSVRAM(), 0xAB, 16u);
             ps2_stubs::sceGsSetDefDBuffDc(rdram.data(), &ctx, &runtime);
 
@@ -637,11 +745,11 @@ void register_ps2_gs_tests()
             t.Equals(testBAddr, 0x47ull, "dbuff clear packet should restore TEST_1 after clearing");
 
             uint64_t rgbaq = static_cast<uint64_t>(kClearColor);
-            std::memcpy(rdram.data() + kEnvAddr + kRgbaqOffset, &rgbaq, sizeof(rgbaq));
+            std::memcpy(rdram.data() + kEnvAddr + kClear1RgbaqOffset, &rgbaq, sizeof(rgbaq));
 
             std::memset(&ctx, 0, sizeof(ctx));
             setRegU32(ctx, 4, kEnvAddr);
-            setRegU32(ctx, 5, 0u);
+            setRegU32(ctx, 5, 1u); // buffer 1 draws into page 0
             ps2_stubs::sceGsSwapDBuffDc(rdram.data(), &ctx, &runtime);
 
             uint32_t clearedPixel = 0u;
@@ -656,6 +764,22 @@ void register_ps2_gs_tests()
             std::memcpy(&clearedMidPixel, runtime.memory().getGSVRAM() + kMidOffset, sizeof(clearedMidPixel));
             t.Equals(clearedMidPixel, kClearColor,
                      "sceGsSwapDBuffDc should clear the interior of the active draw buffer, not just the first pixel");
+
+            // A GIF tag that stops after the two draw environments (NLOOP 16) sends no clear.
+            constexpr uint32_t kGiftag1Offset = 0x1C0u;
+            uint64_t giftag = 0u;
+            std::memcpy(&giftag, rdram.data() + kEnvAddr + kGiftag1Offset, sizeof(giftag));
+            t.Equals(giftag & 0x7FFFull, 22ull, "a clearing dbuff should send 22 A+D registers");
+            giftag = (giftag & ~0x7FFFull) | 16ull;
+            std::memcpy(rdram.data() + kEnvAddr + kGiftag1Offset, &giftag, sizeof(giftag));
+            std::memset(runtime.memory().getGSVRAM(), 0x5A, 16u);
+            std::memset(&ctx, 0, sizeof(ctx));
+            setRegU32(ctx, 4, kEnvAddr);
+            setRegU32(ctx, 5, 1u);
+            ps2_stubs::sceGsSwapDBuffDc(rdram.data(), &ctx, &runtime);
+            uint32_t keptPixel = 0u;
+            std::memcpy(&keptPixel, runtime.memory().getGSVRAM(), sizeof(keptPixel));
+            t.Equals(keptPixel, 0x5A5A5A5Au, "a swap whose GIF tag excludes the clear must leave the draw buffer intact");
         });
 
         tc.Run("sceGsSetDefDBuffDc accepts trailing args from the recompiler register ABI", [](TestCase &t)
@@ -667,8 +791,8 @@ void register_ps2_gs_tests()
             constexpr uint32_t kEnvAddr = 0x5400u;
             constexpr uint32_t kDBuffSize = 0x330u;
             constexpr uint32_t kClear0Offset = 0x160u;
-            constexpr uint32_t kRgbaqOffset = kClear0Offset + 0x20u;
             constexpr uint32_t kRgbaqAddrOffset = kClear0Offset + 0x28u;
+            constexpr uint32_t kClear1RgbaqOffset = 0x2D0u + 0x20u;
             constexpr uint32_t kStackAddr = 0xA00u;
             constexpr uint32_t kClearColor = 0x40201008u;
 
@@ -692,11 +816,11 @@ void register_ps2_gs_tests()
                      "sceGsSetDefDBuffDc should seed the clear packet when trailing args arrive in t0-t2");
 
             const uint64_t rgbaq = static_cast<uint64_t>(kClearColor);
-            std::memcpy(rdram.data() + kEnvAddr + kRgbaqOffset, &rgbaq, sizeof(rgbaq));
+            std::memcpy(rdram.data() + kEnvAddr + kClear1RgbaqOffset, &rgbaq, sizeof(rgbaq));
 
             std::memset(&ctx, 0, sizeof(ctx));
             setRegU32(ctx, 4, kEnvAddr);
-            setRegU32(ctx, 5, 0u);
+            setRegU32(ctx, 5, 1u); // buffer 1 draws into page 0
             ps2_stubs::sceGsSwapDBuffDc(rdram.data(), &ctx, &runtime);
 
             uint32_t clearedPixel = 0u;
@@ -732,6 +856,181 @@ void register_ps2_gs_tests()
             const uint32_t ctx1Pixel = readReferenceFramePSMCT32Pixel(vram, 150u, 1u, 0u, 1u);
             t.Equals(ctx1Pixel, kCtx1Sentinel,
                      "context-targeted clear should leave the other context framebuffer untouched");
+        });
+
+        tc.Run("sceGsSetDefClear builds a clear packet that wipes the target and restores TEST", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            constexpr uint32_t kClearAddr = 0x4000u;
+            constexpr uint32_t kSp = 0x8000u;
+
+            // libgraph ABI as compiled into the game: x..g in a2..t3, then b, a, z at sp+0, sp+8, sp+16.
+            R5900Context ctx{};
+            setRegU32(ctx, 4, kClearAddr);
+            setRegU32(ctx, 5, 2u); // ztest GEQUAL
+            setRegU32(ctx, 6, 0u);
+            setRegU32(ctx, 7, 0u);
+            setRegU32(ctx, 8, 8u);
+            setRegU32(ctx, 9, 8u);
+            setRegU32(ctx, 10, 0x11u);
+            setRegU32(ctx, 11, 0x22u);
+            setRegU32(ctx, 29, kSp);
+            const uint32_t b = 0x33u, a = 0x44u, z = 0x1234u;
+            std::memcpy(rdram.data() + kSp + 0u, &b, 4);
+            std::memcpy(rdram.data() + kSp + 8u, &a, 4);
+            std::memcpy(rdram.data() + kSp + 16u, &z, 4);
+            ps2_stubs::sceGsSetDefClear(rdram.data(), &ctx, &runtime);
+            t.Equals(getRegU32Test(ctx, 2), 6u, "sceGsSetDefClear should return the packet length in qwords");
+
+            uint64_t pairs[12]{};
+            std::memcpy(pairs, rdram.data() + kClearAddr, sizeof(pairs));
+            t.Equals(pairs[0], 0x30000ull, "the clear should draw with ZTST ALWAYS");
+            t.Equals(pairs[10], 0x50000ull, "the trailing TEST should restore the caller's ztest");
+            t.Equals(pairs[11], static_cast<uint64_t>(GS_REG_TEST_1), "TEST is written to context 1");
+
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0xABu);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+            gs.writeRegister(GS_REG_FRAME_1, (1ull << 16) | (static_cast<uint64_t>(GS_PSM_CT32) << 24));
+            gs.writeRegister(GS_REG_ZBUF_1, (64ull) | (1ull << 32));
+            gs.writeRegister(GS_REG_SCISSOR_1, (63ull << 16) | (63ull << 48));
+            gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
+            for (int i = 0; i < 6; ++i)
+                gs.writeRegister(static_cast<uint8_t>(pairs[i * 2 + 1]), pairs[i * 2]);
+
+            t.Equals(gs.ReadVram(GS_PSM_CT32, 0u, 1u, 3u, 3u), 0x44332211u, "pixels inside the clear rectangle take the clear colour");
+            t.Equals(gs.ReadVram(GS_PSM_CT32, 0u, 1u, 12u, 12u), 0xABABABABu, "pixels outside the rectangle are untouched");
+        });
+
+        tc.Run("sceGszbufaddr takes psm, width and height in a0-a2 and counts one buffer in field mode", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            auto zbufaddr = [&](uint32_t psm, uint32_t w, uint32_t h)
+            {
+                R5900Context ctx{};
+                setRegU32(ctx, 4, psm);
+                setRegU32(ctx, 5, w);
+                setRegU32(ctx, 6, h);
+                setRegU32(ctx, 7, 0x1234u); // not an argument
+                ps2_stubs::sceGszbufaddr(rdram.data(), &ctx, &runtime);
+                return getRegU32Test(ctx, 2);
+            };
+
+            resetGraphForTest(rdram, runtime, 0u, 0u);
+            t.Equals(zbufaddr(GS_PSM_CT32, 640u, 448u), 280u, "progressive: Z follows two 140-page CT32 buffers");
+            t.Equals(zbufaddr(GS_PSM_CT16, 640u, 448u), 140u, "CT16 uses 64-line pages: two 70-page buffers");
+
+            resetGraphForTest(rdram, runtime, 1u, 0u);
+            t.Equals(zbufaddr(GS_PSM_CT32, 640u, 448u), 140u, "interlaced field mode counts a single buffer");
+
+            resetGraphForTest(rdram, runtime, 1u, 1u);
+            t.Equals(zbufaddr(GS_PSM_CT32, 640u, 448u), 280u, "interlaced frame mode counts both buffers");
+        });
+
+        tc.Run("sceGsSetDefDrawEnv places ZBUF with the draw psm, not the env pointer", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            resetGraphForTest(rdram, runtime, 1u, 0u);
+
+            // Mana Khemia's 2D layer: SetDefDrawEnv(env, PSMCT16, 640, 448, ztest, zpsm 0).
+            constexpr uint32_t kEnvAddr = 0x4000u;
+            R5900Context ctx{};
+            setRegU32(ctx, 4, kEnvAddr);
+            setRegU32(ctx, 5, GS_PSM_CT16);
+            setRegU32(ctx, 6, 640u);
+            setRegU32(ctx, 7, 448u);
+            setRegU32(ctx, 8, 1u);
+            setRegU32(ctx, 9, 0u);
+            ps2_stubs::sceGsSetDefDrawEnv(rdram.data(), &ctx, &runtime);
+
+            GsDrawEnv1Mem env{};
+            std::memcpy(&env, rdram.data() + kEnvAddr, sizeof(env));
+            t.Equals(env.zbuf1.value & 0x1FFull, 70ull, "ZBP should be libgraph's sceGszbufaddr(CT16, 640, 448)");
+        });
+
+        tc.Run("sceGsPutDrawEnv sends the NLOOP A+D pairs that follow the GIF tag", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            constexpr uint32_t kTagAddr = 0x4000u;
+            constexpr uint32_t kColor = 0x80123456u;
+            const uint64_t pairs[][2] = {
+                {(1ull << 16) | (static_cast<uint64_t>(GS_PSM_CT32) << 24), GS_REG_FRAME_1},
+                {64ull | (1ull << 32), GS_REG_ZBUF_1},
+                {(7ull << 16) | (7ull << 48), GS_REG_SCISSOR_1},
+                {0ull, GS_REG_XYOFFSET_1},
+                {0x30000ull, GS_REG_TEST_1},
+                {static_cast<uint64_t>(GS_PRIM_SPRITE), GS_REG_PRIM},
+                {kColor, GS_REG_RGBAQ},
+                {0ull, GS_REG_XYZ2},
+                {(8ull << 4) | ((8ull << 4) << 16), GS_REG_XYZ2},
+            };
+            const uint64_t tag[2] = {makeGiftagAplusD(9u), 0xEull};
+            std::memcpy(rdram.data() + kTagAddr, tag, sizeof(tag));
+            std::memcpy(rdram.data() + kTagAddr + 16u, pairs, sizeof(pairs));
+
+            R5900Context ctx{};
+            setRegU32(ctx, 4, kTagAddr);
+            ps2_stubs::sceGsPutDrawEnv(rdram.data(), &ctx, &runtime);
+            t.Equals(getRegU32Test(ctx, 2), 0u, "sceGsPutDrawEnv should return 0");
+            t.Equals(runtime.gs().ReadVram(GS_PSM_CT32, 0u, 1u, 3u, 3u), kColor,
+                     "every pair after the tag, including the closing XYZ2, should reach the GS");
+        });
+
+        tc.Run("sceGsSetDefDrawEnv2 truncates FBW where sceGsSetDefDrawEnv rounds it up", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            constexpr uint32_t kEnv1 = 0x4000u;
+            constexpr uint32_t kEnv2 = 0x4100u;
+            R5900Context ctx{};
+            setRegU32(ctx, 4, kEnv1);
+            setRegU32(ctx, 5, GS_PSM_CT32);
+            setRegU32(ctx, 6, 600u);
+            setRegU32(ctx, 7, 448u);
+            ps2_stubs::sceGsSetDefDrawEnv(rdram.data(), &ctx, &runtime);
+            setRegU32(ctx, 4, kEnv2);
+            ps2_stubs::sceGsSetDefDrawEnv2(rdram.data(), &ctx, &runtime);
+
+            GsDrawEnv1Mem env1{};
+            GsDrawEnv2Mem env2{};
+            std::memcpy(&env1, rdram.data() + kEnv1, sizeof(env1));
+            std::memcpy(&env2, rdram.data() + kEnv2, sizeof(env2));
+            t.Equals((env1.frame1.value >> 16) & 0x3Full, 10ull, "FRAME_1 FBW is (600 + 63) >> 6");
+            t.Equals((env2.frame2.value >> 16) & 0x3Full, 9ull, "FRAME_2 FBW is 600 >> 6");
+        });
+
+        tc.Run("sceGsSetDefDrawEnv reads ztest and zpsm from t0/t1 even when both are zero", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            constexpr uint32_t kEnvAddr = 0x4000u;
+            constexpr uint32_t kSp = 0x8000u;
+            const uint32_t staleFrame[2] = {2u, 0xAu}; // whatever the caller left at sp+16/sp+20
+            std::memcpy(rdram.data() + kSp + 16u, staleFrame, sizeof(staleFrame));
+
+            R5900Context ctx{};
+            setRegU32(ctx, 4, kEnvAddr);
+            setRegU32(ctx, 5, GS_PSM_CT16);
+            setRegU32(ctx, 6, 640u);
+            setRegU32(ctx, 7, 448u);
+            setRegU32(ctx, 8, 0u);
+            setRegU32(ctx, 9, 0u);
+            setRegU32(ctx, 29, kSp);
+            ps2_stubs::sceGsSetDefDrawEnv(rdram.data(), &ctx, &runtime);
+
+            GsDrawEnv1Mem env{};
+            std::memcpy(&env, rdram.data() + kEnvAddr, sizeof(env));
+            t.Equals(env.test1.value, 0x30000ull, "ztest 0 should draw with ZTST ALWAYS");
+            t.Equals(env.zbuf1.value >> 24, 0x100ull, "ztest 0 should mask Z writes with zpsm 0");
         });
 
         tc.Run("XYZ3 culls a triangle strip primitive without desynchronizing the vertex queue", [](TestCase &t)
@@ -1074,6 +1373,7 @@ void register_ps2_gs_tests()
             gs.writeRegister(GS_REG_XYZ2, kXyz0);
             gs.writeRegister(GS_REG_UV, kUv1);
             gs.writeRegister(GS_REG_XYZ2, kXyz1);
+            gs.writeRegister(GS_REG_FINISH, 0ull); // drawing may be batched until the GS is synchronized
 
             for (uint32_t y = 0u; y < 4u; ++y)
             {
@@ -1681,8 +1981,10 @@ void register_ps2_gs_tests()
                      "single-circuit presentation should normalize the last row alpha");
         });
 
-        tc.Run("latched host presentation line-doubles interlaced field output", [](TestCase &t)
+        tc.Run("latched host presentation shows the whole buffer in interlaced field mode", [](TestCase &t)
         {
+            // SMODE2 INT=1 FFMD=0 reads alternate lines of one full-height buffer into each field, and a TV
+            // shows both fields, so the host frame must keep every scanline rather than doubling one field.
             std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
             GSRegisters regs{};
             regs.pmode = 0x0001ull;
@@ -1727,17 +2029,10 @@ void register_ps2_gs_tests()
                        (static_cast<uint32_t>(latchedFrame[off + 2u]) << 16);
             };
 
-            const uint32_t row0 = pixelAtRow(0u);
-            const uint32_t row1 = pixelAtRow(1u);
-            const uint32_t row2 = pixelAtRow(2u);
-            const uint32_t row3 = pixelAtRow(3u);
-
-            t.Equals(row0, row1,
-                     "field presentation should duplicate the active field into the next scanline");
-            t.Equals(row2, row3,
-                     "field presentation should duplicate later field scanlines as well");
-            t.IsTrue(row0 != row2,
-                     "field presentation should still preserve different source content across field rows");
+            t.Equals(pixelAtRow(0u), kLine0, "row 0 should come from buffer line 0");
+            t.Equals(pixelAtRow(1u), kLine1, "row 1 should come from buffer line 1, not a copy of line 0");
+            t.Equals(pixelAtRow(2u), kLine2, "row 2 should come from buffer line 2");
+            t.Equals(pixelAtRow(3u), kLine3, "row 3 should come from buffer line 3");
         });
 
         tc.Run("GIF PACKED A+D writes DISPFB1 and DISPLAY1 privileged registers", [](TestCase &t)
@@ -1947,6 +2242,7 @@ void register_ps2_gs_tests()
                 gs.writeRegister(GS_REG_XYZ2, (64ull << 0) | (0ull << 16));
                 gs.writeRegister(GS_REG_ST, packSt(s, tVal));
                 gs.writeRegister(GS_REG_XYZ2, (0ull << 0) | (64ull << 16));
+                gs.writeRegister(GS_REG_FINISH, 0ull); // drawing may be batched until the GS is synchronized
 
                 const uint32_t pixel = readReferencePSMCT32Pixel(vram, 0u, 1u, 1u, 1u);
                 t.Equals(pixel, sample.color,
@@ -2381,6 +2677,78 @@ void register_ps2_gs_tests()
             t.Equals(out[5], static_cast<uint8_t>(0x66u), "pixel1 B should roundtrip");
         });
 
+        tc.Run("GS CT24 upload keeps pixels that straddle IMAGE packets", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            const uint64_t bitblt =
+                (static_cast<uint64_t>(1u) << 16) |     // SBW
+                (static_cast<uint64_t>(GS_PSM_CT24) << 24) |
+                (static_cast<uint64_t>(1u) << 48) |     // DBW
+                (static_cast<uint64_t>(GS_PSM_CT24) << 56);
+            gs.writeRegister(GS_REG_BITBLTBUF, bitblt);
+            gs.writeRegister(GS_REG_TRXPOS, 0ull);
+            gs.writeRegister(GS_REG_TRXREG, (16ull << 0) | (1ull << 32)); // 16 pixels = 48 bytes = 3 qwords
+            gs.writeRegister(GS_REG_TRXDIR, 0ull);
+
+            uint8_t rgb[48];
+            for (uint32_t i = 0; i < sizeof(rgb); ++i)
+                rgb[i] = static_cast<uint8_t>(0x10u + i);
+
+            // One qword per IMAGE packet: 16 bytes is 5 pixels plus one byte of the sixth.
+            for (uint32_t qw = 0; qw < 3u; ++qw)
+            {
+                std::vector<uint8_t> packet;
+                appendU64(packet, makeGifTag(1u, GIF_FMT_IMAGE, 0u, true));
+                appendU64(packet, 0ull);
+                packet.insert(packet.end(), rgb + qw * 16u, rgb + qw * 16u + 16u);
+                gs.processGIFPacket(packet.data(), static_cast<uint32_t>(packet.size()));
+            }
+
+            gs.writeRegister(GS_REG_TRXDIR, 1ull);
+            uint8_t out[48] = {};
+            const uint32_t outBytes = gs.consumeLocalToHostBytes(out, sizeof(out));
+            t.Equals(outBytes, 48u, "16 CT24 pixels should read back as 48 bytes");
+            t.IsTrue(std::memcmp(out, rgb, sizeof(rgb)) == 0,
+                     "CT24 pixels split across IMAGE packets should land intact and in order");
+        });
+
+        tc.Run("GS CT24 upload through HWREG assembles pixels across 8-byte writes", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            const uint64_t bitblt =
+                (static_cast<uint64_t>(1u) << 16) |
+                (static_cast<uint64_t>(GS_PSM_CT24) << 24) |
+                (static_cast<uint64_t>(1u) << 48) |
+                (static_cast<uint64_t>(GS_PSM_CT24) << 56);
+            gs.writeRegister(GS_REG_BITBLTBUF, bitblt);
+            gs.writeRegister(GS_REG_TRXPOS, 0ull);
+            gs.writeRegister(GS_REG_TRXREG, (8ull << 0) | (1ull << 32)); // 8 pixels = 24 bytes = 3 HWREG writes
+            gs.writeRegister(GS_REG_TRXDIR, 0ull);
+
+            uint8_t rgb[24];
+            for (uint32_t i = 0; i < sizeof(rgb); ++i)
+                rgb[i] = static_cast<uint8_t>(0xA0u + i);
+            for (uint32_t i = 0; i < 3u; ++i)
+            {
+                uint64_t value = 0;
+                std::memcpy(&value, rgb + i * 8u, sizeof(value));
+                gs.writeRegister(GS_REG_HWREG, value);
+            }
+
+            gs.writeRegister(GS_REG_TRXDIR, 1ull);
+            uint8_t out[24] = {};
+            const uint32_t outBytes = gs.consumeLocalToHostBytes(out, sizeof(out));
+            t.Equals(outBytes, 24u, "8 CT24 pixels should read back as 24 bytes");
+            t.IsTrue(std::memcmp(out, rgb, sizeof(rgb)) == 0,
+                     "CT24 pixels split across HWREG writes should land intact and in order");
+        });
+
         tc.Run("GS PSMT4 host-local-host keeps nibble packing stable", [](TestCase &t)
         {
             std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
@@ -2714,6 +3082,1063 @@ void register_ps2_gs_tests()
             std::memcpy(&pixel, vram.data(), sizeof(pixel));
             t.Equals(pixel, kExpectedColor,
                      "T4 CSM1 lookup should keep the cached palette after its source VRAM is reused");
+        });
+
+        tc.Run("GS row-band parallel rasterization writes the same VRAM as drawing serially", [](TestCase &t)
+        {
+            // A mixed stream: CT32 and T8/CLUT textures, point and bilinear sampling, STQ and UV
+            // coordinates, blending, Z tests, primitives that sample their own target, uploads, TEXFLUSH.
+            auto render = [](uint32_t threads, bool async)
+            {
+                std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+                uint32_t seed = 0x1234567u;
+                auto next = [&seed]()
+                {
+                    seed = seed * 1664525u + 1013904223u;
+                    return seed >> 8u;
+                };
+                for (uint8_t &byte : vram)
+                    byte = static_cast<uint8_t>(next());
+
+                std::vector<uint32_t> readback;
+                GSCpuBackend gs;
+                gs.Initialize(vram.data(), static_cast<uint32_t>(vram.size()));
+                gs.SetRasterThreads(threads);
+                gs.SetAsync(async);
+
+                GSTex0Reg clutTex{};
+                clutTex.psm = GS_PSM_T8;
+                clutTex.cpsm = GS_PSM_CT32;
+                clutTex.cbp = 12000u;
+                clutTex.cld = 1u;
+                gs.LoadClut(clutTex, GSTexClutReg{});
+
+                for (int i = 0; i < 600; ++i)
+                {
+                    GSPrimitiveBatch batch{};
+                    GSDrawState &state = batch.state;
+                    const bool sprite = (next() % 3u) == 0u;
+                    state.prim.type = sprite ? GS_PRIM_SPRITE : GS_PRIM_TRIANGLE;
+                    state.prim.tme = (next() % 5u) != 0u;
+                    state.prim.abe = (next() % 2u) != 0u;
+                    state.prim.iip = (next() % 2u) != 0u;
+                    state.prim.fst = sprite || (next() % 2u) != 0u;
+                    auto &ctx = state.context;
+                    ctx.frame.fbp = 0u;
+                    ctx.frame.fbw = 10u;
+                    ctx.frame.psm = GS_PSM_CT32;
+                    ctx.zbuf.zbp = 150u;
+                    ctx.zbuf.psm = GS_PSM_Z24;
+                    ctx.zbuf.zmask = (next() % 4u) == 0u;
+                    ctx.scissor = {0u, 639u, 0u, 447u};
+                    ctx.test = (static_cast<uint64_t>(1u + next() % 3u) << 17u) | (1ull << 16u);
+                    ctx.alpha = 0x80ull << 32u | (next() % 2u ? 0x44u : 0x48u);
+                    const bool clut = (next() % 2u) != 0u;
+                    const bool selfSample = (next() % 25u) == 0u;
+                    ctx.tex0.psm = clut ? GS_PSM_T8 : GS_PSM_CT32;
+                    ctx.tex0.tbp0 = selfSample ? 0u : (clut ? 9000u : 10000u) + (next() % 4u) * 32u;
+                    ctx.tex0.tbw = clut ? 4u : 2u;
+                    ctx.tex0.tcc = 1u;
+                    ctx.tex0.tfx = static_cast<uint8_t>(next() % 2u);
+                    ctx.tex0.cpsm = GS_PSM_CT32;
+                    ctx.clamp = next() % 2u;
+                    state.textureWidth = clut ? 256u : 128u;
+                    state.textureHeight = 128u;
+                    state.linearFilter = (next() % 2u) != 0u;
+                    batch.vertexCount = sprite ? 2u : 3u;
+                    for (int v = 0; v < 3; ++v)
+                    {
+                        GSVertex &vertex = batch.vertices[static_cast<size_t>(v)];
+                        vertex.x = static_cast<float>(next() % 700u) - 30.0f;
+                        vertex.y = static_cast<float>(next() % 500u) - 30.0f;
+                        vertex.z = static_cast<double>(next() % 0xFFFFFFu);
+                        vertex.r = static_cast<uint8_t>(next());
+                        vertex.g = static_cast<uint8_t>(next());
+                        vertex.b = static_cast<uint8_t>(next());
+                        vertex.a = static_cast<uint8_t>(next());
+                        vertex.u = static_cast<uint16_t>(next() % (256u * 16u));
+                        vertex.v = static_cast<uint16_t>(next() % (128u * 16u));
+                        vertex.s = static_cast<float>(next() % 1000u) / 500.0f;
+                        vertex.t = static_cast<float>(next() % 1000u) / 500.0f;
+                        vertex.q = 0.5f + static_cast<float>(next() % 100u) / 100.0f;
+                    }
+                    gs.Submit(batch);
+
+                    // Reads in mid-stream must see every earlier draw, even when drawing runs on a GS thread.
+                    if (i % 41 == 7)
+                    {
+                        const uint32_t x = next() % 640u;
+                        const uint32_t y = next() % 448u;
+                        readback.push_back(gs.ReadVram(GS_PSM_CT32, 0u, 10u, x, y));
+                    }
+
+                    if (i % 97 == 50)
+                    {
+                        // Rewrite part of a texture without TEXFLUSH, then flush on alternate rounds.
+                        GSTransferCommand upload{};
+                        upload.bitbltbuf.dbp = 10000u;
+                        upload.bitbltbuf.dbw = 2u;
+                        upload.bitbltbuf.dpsm = GS_PSM_CT32;
+                        upload.trxreg.rrw = 32u;
+                        upload.trxreg.rrh = 8u;
+                        upload.direction = 0u;
+                        gs.BeginTransfer(upload);
+                        std::vector<uint8_t> pixels(32u * 8u * 4u);
+                        for (uint8_t &byte : pixels)
+                            byte = static_cast<uint8_t>(next());
+                        gs.UploadImage(pixels.data(), static_cast<uint32_t>(pixels.size()));
+                        if ((i / 97) % 2 == 0)
+                            gs.TextureFlush();
+                    }
+                }
+                std::vector<uint8_t> out;
+                gs.SnapshotVram(out);
+                for (uint32_t value : readback)
+                    out.insert(out.end(), reinterpret_cast<const uint8_t *>(&value), reinterpret_cast<const uint8_t *>(&value) + 4);
+                return out;
+            };
+
+            const std::vector<uint8_t> serial = render(1u, false);
+            const std::vector<uint8_t> parallel = render(4u, false);
+            t.IsTrue(serial == parallel, "four row bands must produce byte-identical VRAM to one thread");
+            t.IsTrue(serial == render(4u, true), "a GS thread must produce byte-identical VRAM to drawing in place");
+        });
+
+        tc.Run("GS row ranges balanced by pixel count draw the same as one thread", [](TestCase &t)
+        {
+            // Work piled into a few rows (and one primitive spanning all of them) moves the cuts between
+            // workers' row ranges off the even split; every split must still give the serial result.
+            auto render = [](uint32_t threads)
+            {
+                std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+                uint32_t seed = 0x5EEDu;
+                auto next = [&seed]()
+                {
+                    seed = seed * 1664525u + 1013904223u;
+                    return seed >> 8u;
+                };
+                for (uint8_t &byte : vram)
+                    byte = static_cast<uint8_t>(next());
+
+                GSCpuBackend gs;
+                gs.Initialize(vram.data(), static_cast<uint32_t>(vram.size()));
+                gs.SetRasterThreads(threads);
+                for (int i = 0; i < 400; ++i)
+                {
+                    GSPrimitiveBatch batch{};
+                    GSDrawState &state = batch.state;
+                    const bool sprite = (next() % 2u) == 0u;
+                    state.prim.type = sprite ? GS_PRIM_SPRITE : GS_PRIM_TRIANGLE;
+                    state.prim.tme = (next() % 2u) != 0u;
+                    state.prim.abe = true;
+                    state.prim.iip = true;
+                    state.prim.fst = true;
+                    auto &ctx = state.context;
+                    ctx.frame.fbp = 0u;
+                    ctx.frame.fbw = 10u;
+                    ctx.frame.psm = GS_PSM_CT32;
+                    ctx.zbuf.zbp = 150u;
+                    ctx.zbuf.psm = GS_PSM_Z24;
+                    ctx.scissor = {0u, 639u, 0u, 447u};
+                    ctx.test = (2ull << 17u) | (1ull << 16u);
+                    ctx.alpha = 0x80ull << 32u | 0x44u;
+                    ctx.tex0.psm = GS_PSM_CT32;
+                    ctx.tex0.tbp0 = 10000u;
+                    ctx.tex0.tbw = 2u;
+                    ctx.tex0.tcc = 1u;
+                    state.textureWidth = 128u;
+                    state.textureHeight = 128u;
+                    batch.vertexCount = sprite ? 2u : 3u;
+                    const bool tall = i % 50 == 0;
+                    const float band = static_cast<float>(i % 3 == 0 ? 96u : 300u);
+                    for (int v = 0; v < 3; ++v)
+                    {
+                        GSVertex &vertex = batch.vertices[static_cast<size_t>(v)];
+                        vertex.x = static_cast<float>(next() % 640u);
+                        vertex.y = tall ? static_cast<float>(next() % 448u) : band + static_cast<float>(next() % 13u);
+                        vertex.z = static_cast<double>(next() % 0xFFFFFFu);
+                        vertex.r = static_cast<uint8_t>(next());
+                        vertex.g = static_cast<uint8_t>(next());
+                        vertex.b = static_cast<uint8_t>(next());
+                        vertex.a = static_cast<uint8_t>(next());
+                        vertex.u = static_cast<uint16_t>(next() % (128u * 16u));
+                        vertex.v = static_cast<uint16_t>(next() % (128u * 16u));
+                    }
+                    gs.Submit(batch);
+                }
+                std::vector<uint8_t> out;
+                gs.SnapshotVram(out);
+                return out;
+            };
+
+            const std::vector<uint8_t> serial = render(1u);
+            for (uint32_t threads = 2u; threads <= 5u; ++threads)
+                t.IsTrue(serial == render(threads), "every row split must produce byte-identical VRAM to one thread");
+        });
+
+        tc.Run("GS bilinear quad fetch reads and records what four texel fetches do", [](TestCase &t)
+        {
+            GSMem::InitLookupTables();
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            uint32_t seed = 0xBEEFu;
+            auto next = [&seed]()
+            {
+                seed = seed * 1664525u + 1013904223u;
+                return seed >> 8u;
+            };
+            for (uint8_t &byte : vram)
+                byte = static_cast<uint8_t>(next());
+            const uint32_t formats[] = {GS_PSM_CT32, GS_PSM_CT24, GS_PSM_CT16, GS_PSM_CT16S, GS_PSM_T8, GS_PSM_T4, GS_PSM_T8H,
+                                        GS_PSM_T4HL, GS_PSM_T4HH, GS_PSM_Z32, GS_PSM_Z24, GS_PSM_Z16, GS_PSM_Z16S};
+            bool same = true;
+            for (uint32_t psm : formats)
+            {
+                const GSMem::TextureFetchFn fetch = GSMem::TextureFetcher(psm);
+                const GSMem::TextureQuadFetchFn fetchQuad = GSMem::TextureQuadFetcher(psm);
+                GSMem::TexturePageCache single;
+                GSMem::TexturePageCache quad;
+                const bool tracking = psm % 2u == 0u;
+                single.ResetForBand(tracking);
+                quad.ResetForBand(tracking);
+                for (int i = 0; i < 2000; ++i)
+                {
+                    const uint32_t bp = next() % 16384u;
+                    const uint32_t bw = 1u + next() % 10u;
+                    // Mostly neighbours, often across a page edge, sometimes wrapped apart.
+                    const uint32_t u0 = (next() % 4u == 0u) ? (next() % 8u) * 64u + 63u : next() % 1024u;
+                    const uint32_t v0 = (next() % 4u == 0u) ? (next() % 8u) * 32u + 31u : next() % 1024u;
+                    const uint32_t u1 = (next() % 8u == 0u) ? next() % 1024u : u0 + 1u;
+                    const uint32_t v1 = (next() % 8u == 0u) ? next() % 1024u : v0 + 1u;
+                    single.BeginPixel(static_cast<uint32_t>(i), 0, i);
+                    quad.BeginPixel(static_cast<uint32_t>(i), 0, i);
+                    uint32_t expected[4] = {fetch(single, vram.data(), bp, bw, u0, v0), fetch(single, vram.data(), bp, bw, u1, v0),
+                                            fetch(single, vram.data(), bp, bw, u0, v1), fetch(single, vram.data(), bp, bw, u1, v1)};
+                    uint32_t actual[4] = {};
+                    fetchQuad(quad, vram.data(), bp, bw, u0, u1, v0, v1, actual);
+                    uint32_t singlePage = 0u, quadPage = 0u;
+                    single.CachedPage(singlePage);
+                    quad.CachedPage(quadPage);
+                    const auto &a = single.Track();
+                    const auto &b = quad.Track();
+                    if (std::memcmp(expected, actual, sizeof(expected)) != 0 || singlePage != quadPage || a.lastPage != b.lastPage ||
+                        a.last.texel != b.last.texel || a.last.valid != b.last.valid || a.other.texel != b.other.texel ||
+                        a.other.x != b.other.x || a.switchedInsidePixel != b.switchedInsidePixel)
+                        same = false;
+                }
+            }
+            t.IsTrue(same, "a quad fetch must return the texels, cached page and recorded reads of four single fetches");
+        });
+
+        tc.Run("GS direct target addressing matches the generic pixel accessors", [](TestCase &t)
+        {
+            GSMem::InitLookupTables();
+            struct Format
+            {
+                uint32_t psm;
+                void (*write)(uint8_t *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
+                uint32_t (*read)(uint8_t *, uint32_t, uint32_t, uint32_t, uint32_t);
+                uint32_t bytes;
+                uint32_t mask;
+            };
+            const Format formats[] = {
+                {GS_PSM_CT32, GSMem::WriteCT32, GSMem::ReadCT32, 4u, 0xFFFFFFFFu},
+                {GS_PSM_CT24, GSMem::WriteCT24, GSMem::ReadCT24, 4u, 0x00FFFFFFu},
+                {GS_PSM_CT16, GSMem::WriteCT16, GSMem::ReadCT16, 2u, 0xFFFFu},
+                {GS_PSM_CT16S, GSMem::WriteCT16S, GSMem::ReadCT16S, 2u, 0xFFFFu},
+                {GS_PSM_Z32, GSMem::WriteZ32, GSMem::ReadZ32, 4u, 0xFFFFFFFFu},
+                {GS_PSM_Z24, GSMem::WriteZ24, GSMem::ReadZ24, 4u, 0x00FFFFFFu},
+                {GS_PSM_Z16, GSMem::WriteZ16, GSMem::ReadZ16, 2u, 0xFFFFu},
+                {GS_PSM_Z16S, GSMem::WriteZ16S, GSMem::ReadZ16S, 2u, 0xFFFFu},
+            };
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            uint32_t seed = 99u;
+            auto next = [&seed]()
+            {
+                seed = seed * 1664525u + 1013904223u;
+                return seed >> 8u;
+            };
+            bool matches = true;
+            for (const Format &format : formats)
+            {
+                const GSMem::PixelOffsetFn offset = GSMem::TargetPixelOffset(format.psm);
+                if (!offset)
+                {
+                    matches = false;
+                    continue;
+                }
+                for (int i = 0; i < 400; ++i)
+                {
+                    const uint32_t bp = next() % 16384u;
+                    const uint32_t bw = 1u + next() % 16u;
+                    const uint32_t x = next() % 1024u;
+                    const uint32_t y = next() % 1024u;
+                    const uint32_t value = next() * 2654435761u;
+                    format.write(vram.data(), bp, bw, x, y, value);
+                    uint32_t stored = 0u;
+                    std::memcpy(&stored, vram.data() + offset(bp, bw, x, y), format.bytes);
+                    if ((stored & format.mask) != (value & format.mask) || format.read(vram.data(), bp, bw, x, y) != (value & format.mask))
+                        matches = false;
+                }
+            }
+            t.IsTrue(matches, "the byte offset of every drawable format must be where the generic writer stores the pixel");
+        });
+
+        tc.Run("GS primitives sampling the top byte of their own RGB24 target draw the same in parallel", [](TestCase &t)
+        {
+            // T8H/T4HL/T4HH textures stored in the unused byte of the RGB24 frame they draw into, each followed
+            // by an RGB24 read of the same texels: that read hits the page the texture buffer ended on, so it
+            // shows whether parallel drawing left the buffer exactly as a serial draw would.
+            auto render = [](uint32_t threads, bool async)
+            {
+                std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+                uint32_t seed = 0x2468ACEu;
+                auto next = [&seed]()
+                {
+                    seed = seed * 1664525u + 1013904223u;
+                    return seed >> 8u;
+                };
+                for (uint8_t &byte : vram)
+                    byte = static_cast<uint8_t>(next());
+
+                GSCpuBackend gs;
+                gs.Initialize(vram.data(), static_cast<uint32_t>(vram.size()));
+                gs.SetRasterThreads(threads);
+                gs.SetAsync(async);
+                GSTex0Reg clutTex{};
+                clutTex.psm = GS_PSM_T8H;
+                clutTex.cpsm = GS_PSM_CT32;
+                clutTex.cbp = 13000u;
+                clutTex.cld = 1u;
+                gs.LoadClut(clutTex, GSTexClutReg{});
+
+                auto baseState = [&](GSPrimitiveBatch &batch)
+                {
+                    GSDrawState &state = batch.state;
+                    auto &ctx = state.context;
+                    ctx.frame.fbp = 0u;
+                    ctx.frame.fbw = 10u;
+                    ctx.frame.psm = GS_PSM_CT24;
+                    ctx.zbuf.zbp = 160u;
+                    ctx.zbuf.psm = GS_PSM_Z24;
+                    ctx.zbuf.zmask = (next() % 3u) == 0u;
+                    ctx.scissor = {0u, 639u, 0u, 447u};
+                    ctx.test = (static_cast<uint64_t>(1u + next() % 3u) << 17u) | (1ull << 16u);
+                    ctx.alpha = 0x80ull << 32u | 0x44u;
+                    ctx.tex0.tbw = 10u;
+                    ctx.tex0.tcc = 1u;
+                    ctx.tex0.cpsm = GS_PSM_CT32;
+                    state.textureWidth = 1024u;
+                    state.textureHeight = 512u;
+                    state.prim.tme = true;
+                };
+
+                for (int i = 0; i < 160; ++i)
+                {
+                    const uint32_t x0 = next() % 500u;
+                    const uint32_t y0 = next() % 380u;
+                    const uint32_t w = 64u + next() % 120u;
+                    const uint32_t h = 64u + next() % 60u;
+                    // Mostly draw over the very texels being sampled, so the buffered page's timing shows.
+                    const bool overlay = (next() % 3u) != 0u;
+                    const uint32_t u0 = overlay ? x0 : next() % 500u;
+                    const uint32_t v0 = overlay ? y0 : next() % 380u;
+                    const uint32_t blockOffset = (next() % 3u) * 32u * 10u;
+
+                    GSPrimitiveBatch alias{};
+                    baseState(alias);
+                    const bool sprite = (next() % 2u) != 0u;
+                    alias.state.prim.type = sprite ? GS_PRIM_SPRITE : GS_PRIM_TRIANGLE;
+                    alias.state.prim.fst = true;
+                    alias.state.prim.abe = (next() % 2u) != 0u;
+                    alias.state.prim.iip = (next() % 2u) != 0u;
+                    alias.state.linearFilter = (next() % 3u) == 0u;
+                    const uint32_t topFormats[3] = {GS_PSM_T8H, GS_PSM_T4HL, GS_PSM_T4HH};
+                    alias.state.context.tex0.psm = static_cast<uint8_t>(topFormats[next() % 3u]);
+                    alias.state.context.tex0.tbp0 = blockOffset;
+                    alias.state.context.tex0.tfx = static_cast<uint8_t>(next() % 2u);
+                    alias.vertexCount = sprite ? 2u : 3u;
+                    const uint32_t xs[3] = {x0, x0 + w, sprite ? 0u : x0};
+                    const uint32_t ys[3] = {y0, y0 + h, sprite ? 0u : y0 + h};
+                    const uint32_t us[3] = {u0, u0 + w, u0};
+                    const uint32_t vs[3] = {v0, v0 + h, v0 + h};
+                    for (int v = 0; v < 3; ++v)
+                    {
+                        GSVertex &vertex = alias.vertices[static_cast<size_t>(v)];
+                        vertex.x = static_cast<float>(sprite || v != 1 ? xs[v] : x0 + w);
+                        vertex.y = static_cast<float>(sprite || v != 1 ? ys[v] : y0);
+                        vertex.z = static_cast<double>(next() % 0xFFFFFFu);
+                        vertex.r = static_cast<uint8_t>(next());
+                        vertex.g = static_cast<uint8_t>(next());
+                        vertex.b = static_cast<uint8_t>(next());
+                        vertex.a = static_cast<uint8_t>(next());
+                        vertex.u = static_cast<uint16_t>(us[v] * 16u);
+                        vertex.v = static_cast<uint16_t>(vs[v] * 16u);
+                    }
+                    gs.Submit(alias);
+
+                    // Read back texels the alias primitive sampled last, and some at random, through RGB24.
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        GSPrimitiveBatch probe{};
+                        baseState(probe);
+                        probe.state.prim.type = GS_PRIM_SPRITE;
+                        probe.state.prim.fst = true;
+                        probe.state.context.tex0.psm = GS_PSM_CT24;
+                        probe.state.context.tex0.tbp0 = blockOffset;
+                        probe.state.context.zbuf.zmask = true;
+                        probe.state.context.test = 0x30000ull;
+                        probe.vertexCount = 2u;
+                        const uint32_t pu = k == 0 ? u0 + w - 1u : u0 + next() % w;
+                        const uint32_t pv = k == 0 ? v0 + h - 1u : v0 + next() % h;
+                        const uint32_t px = 600u + static_cast<uint32_t>(k);
+                        const uint32_t py = static_cast<uint32_t>(i) % 440u;
+                        probe.vertices[0].x = static_cast<float>(px);
+                        probe.vertices[0].y = static_cast<float>(py);
+                        probe.vertices[1].x = static_cast<float>(px + 1u);
+                        probe.vertices[1].y = static_cast<float>(py + 1u);
+                        probe.vertices[1].r = probe.vertices[1].g = probe.vertices[1].b = probe.vertices[1].a = 0x80u;
+                        probe.vertices[0].u = static_cast<uint16_t>(pu * 16u + 8u);
+                        probe.vertices[0].v = static_cast<uint16_t>(pv * 16u + 8u);
+                        probe.vertices[1].u = static_cast<uint16_t>(pu * 16u + 24u);
+                        probe.vertices[1].v = static_cast<uint16_t>(pv * 16u + 24u);
+                        probe.state.context.tex0.tfx = 1u;
+                        gs.Submit(probe);
+                    }
+                    if (i % 37 == 36)
+                        gs.TextureFlush();
+                }
+                std::vector<uint8_t> out;
+                gs.SnapshotVram(out);
+                return out;
+            };
+
+            const std::vector<uint8_t> serial = render(1u, false);
+            const std::vector<uint8_t> parallel = render(4u, false);
+            t.IsTrue(serial == parallel, "self-sampling RGB24 draws must leave VRAM and the texture buffer as serially");
+            t.IsTrue(serial == render(4u, true), "a GS thread must leave VRAM and the texture buffer as serially");
+        });
+
+        tc.Run("GS small self-sampling RGB24 batches with palette loads between them draw the same as serially", [](TestCase &t)
+        {
+            // Runs too small for the workers are drawn as one band on the queueing thread, so a palette load
+            // from VRAM no longer ends them. Each round ends with an RGB24 sprite drawn alone that samples the
+            // page the run ended on, which shows what the texture buffer holds.
+            auto render = [](uint32_t threads)
+            {
+                std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+                uint32_t seed = 0x5EED1234u;
+                auto next = [&seed]()
+                {
+                    seed = seed * 1664525u + 1013904223u;
+                    return seed >> 8u;
+                };
+                for (uint8_t &byte : vram)
+                    byte = static_cast<uint8_t>(next());
+
+                GSCpuBackend gs;
+                gs.Initialize(vram.data(), static_cast<uint32_t>(vram.size()));
+                gs.SetRasterThreads(threads);
+                auto loadClut = [&](uint32_t psm)
+                {
+                    GSTex0Reg clutTex{};
+                    clutTex.psm = static_cast<uint8_t>(psm);
+                    clutTex.cpsm = GS_PSM_CT32;
+                    clutTex.cbp = 13000u + (next() % 4u) * 64u;
+                    clutTex.cld = 1u;
+                    gs.LoadClut(clutTex, GSTexClutReg{});
+                };
+                auto sprite = [&](uint32_t texturePsm, uint32_t x0, uint32_t y0, uint32_t w, uint32_t h, uint32_t u0, uint32_t v0)
+                {
+                    GSPrimitiveBatch batch{};
+                    GSDrawState &state = batch.state;
+                    auto &ctx = state.context;
+                    ctx.frame.fbp = 0u;
+                    ctx.frame.fbw = 10u;
+                    ctx.frame.psm = GS_PSM_CT24;
+                    ctx.zbuf.zbp = 160u;
+                    ctx.zbuf.psm = GS_PSM_Z16S;
+                    ctx.scissor = {0u, 639u, 0u, 447u};
+                    ctx.test = 1ull << 17u;
+                    ctx.tex0.psm = static_cast<uint8_t>(texturePsm);
+                    ctx.tex0.tbp0 = 0u;
+                    ctx.tex0.tbw = 10u;
+                    ctx.tex0.tcc = 1u;
+                    ctx.tex0.tfx = 1u;
+                    ctx.tex0.cpsm = GS_PSM_CT32;
+                    state.textureWidth = 1024u;
+                    state.textureHeight = 512u;
+                    state.prim.type = GS_PRIM_SPRITE;
+                    state.prim.tme = true;
+                    state.prim.fst = true;
+                    state.prim.abe = (next() % 2u) != 0u;
+                    ctx.alpha = 0x80ull << 32u | 0x44u;
+                    batch.vertexCount = 2u;
+                    batch.vertices[0].x = static_cast<float>(x0);
+                    batch.vertices[0].y = static_cast<float>(y0);
+                    batch.vertices[1].x = static_cast<float>(x0 + w);
+                    batch.vertices[1].y = static_cast<float>(y0 + h);
+                    batch.vertices[0].u = static_cast<uint16_t>(u0 * 16u);
+                    batch.vertices[0].v = static_cast<uint16_t>(v0 * 16u);
+                    batch.vertices[1].u = static_cast<uint16_t>((u0 + w) * 16u);
+                    batch.vertices[1].v = static_cast<uint16_t>((v0 + h) * 16u);
+                    batch.vertices[1].r = batch.vertices[1].g = batch.vertices[1].b = batch.vertices[1].a = 0x80u;
+                    gs.Submit(batch);
+                };
+                loadClut(GS_PSM_T8H);
+                for (int round = 0; round < 64; ++round)
+                {
+                    const uint32_t topFormats[3] = {GS_PSM_T8H, GS_PSM_T4HL, GS_PSM_T4HH};
+                    const uint32_t run = 1u + next() % 5u;
+                    uint32_t lastX = 0u, lastY = 0u;
+                    for (uint32_t k = 0; k < run; ++k)
+                    {
+                        const uint32_t psm = topFormats[next() % 3u];
+                        if ((next() % 2u) == 0u)
+                            loadClut(psm);
+                        lastX = next() % 600u;
+                        lastY = next() % 420u;
+                        sprite(psm, lastX, lastY, 8u + next() % 24u, 8u + next() % 20u, next() % 600u, next() % 420u);
+                    }
+                    // Drawn alone: an RGB24 sample of its own frame reads the words through the texture buffer.
+                    sprite(GS_PSM_CT24, next() % 600u, next() % 420u, 16u, 8u, lastX, lastY);
+                }
+                gs.Flush();
+                return vram;
+            };
+
+            const std::vector<uint8_t> serial = render(1u);
+            t.IsTrue(serial == render(4u), "small batches across palette loads must leave VRAM as serial drawing does");
+        });
+
+        tc.Run("GS framebuffer clears split across raster threads match a serial clear", [](TestCase &t)
+        {
+            // Full-frame and partial clears with and without a frame mask, in 32-, 24- and 16-bit formats,
+            // between textured sprites whose sampling leaves a page in the texture buffer that a clear
+            // overwrites; the next sprite samples it again.
+            auto render = [](uint32_t threads)
+            {
+                std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+                uint32_t seed = 0xC1EA12u;
+                auto next = [&seed]()
+                {
+                    seed = seed * 1664525u + 1013904223u;
+                    return seed >> 8u;
+                };
+                for (uint8_t &byte : vram)
+                    byte = static_cast<uint8_t>(next());
+
+                GSCpuBackend gs;
+                gs.Initialize(vram.data(), static_cast<uint32_t>(vram.size()));
+                gs.SetRasterThreads(threads);
+                const uint8_t formats[4] = {GS_PSM_CT32, GS_PSM_CT24, GS_PSM_CT16, GS_PSM_CT16S};
+                for (int round = 0; round < 24; ++round)
+                {
+                    GSPrimitiveBatch batch{};
+                    GSDrawState &state = batch.state;
+                    auto &ctx = state.context;
+                    ctx.frame.fbp = 200u;
+                    ctx.frame.fbw = 10u;
+                    ctx.frame.psm = GS_PSM_CT32;
+                    ctx.zbuf.zbp = 400u;
+                    ctx.zbuf.psm = GS_PSM_Z32;
+                    ctx.scissor = {0u, 639u, 0u, 447u};
+                    ctx.test = 1ull << 17u;
+                    // Samples the frame the clears below write, so the texture buffer holds one of its pages.
+                    ctx.tex0.tbp0 = 0u;
+                    ctx.tex0.tbw = 10u;
+                    ctx.tex0.psm = GS_PSM_CT32;
+                    ctx.tex0.tcc = 1u;
+                    ctx.tex0.tfx = 1u;
+                    state.textureWidth = 1024u;
+                    state.textureHeight = 512u;
+                    state.prim.type = GS_PRIM_SPRITE;
+                    state.prim.tme = true;
+                    state.prim.fst = true;
+                    batch.vertexCount = 2u;
+                    const uint32_t x0 = next() % 500u, y0 = next() % 380u;
+                    batch.vertices[0].x = static_cast<float>(x0);
+                    batch.vertices[0].y = static_cast<float>(y0);
+                    batch.vertices[1].x = static_cast<float>(x0 + 64u);
+                    batch.vertices[1].y = static_cast<float>(y0 + 32u);
+                    const uint32_t u0 = next() % 500u, v0 = next() % 380u;
+                    batch.vertices[0].u = static_cast<uint16_t>(u0 * 16u);
+                    batch.vertices[0].v = static_cast<uint16_t>(v0 * 16u);
+                    batch.vertices[1].u = static_cast<uint16_t>((u0 + 64u) * 16u);
+                    batch.vertices[1].v = static_cast<uint16_t>((v0 + 32u) * 16u);
+                    gs.Submit(batch);
+
+                    GSContext clear{};
+                    clear.frame.fbp = 0u;
+                    clear.frame.fbw = 10u;
+                    clear.frame.psm = formats[next() % 4u];
+                    clear.frame.fbmsk = (next() % 2u) != 0u ? (next() & 0xFF00FF0Fu) : 0u;
+                    clear.fba = next() % 2u;
+                    const bool full = (next() % 2u) != 0u;
+                    const uint32_t cx0 = full ? 0u : next() % 300u;
+                    const uint32_t cy0 = full ? 0u : next() % 200u;
+                    clear.scissor = {static_cast<uint16_t>(cx0), static_cast<uint16_t>(full ? 639u : cx0 + 40u + next() % 300u),
+                                     static_cast<uint16_t>(cy0), static_cast<uint16_t>(full ? 447u : cy0 + 30u + next() % 240u)};
+                    gs.ClearFramebuffer(clear, next());
+                }
+                gs.Flush();
+                return vram;
+            };
+
+            const std::vector<uint8_t> serial = render(1u);
+            t.IsTrue(serial == render(4u), "clears drawn by several threads must leave VRAM as a serial clear does");
+        });
+
+        tc.Run("GS batched perspective triangles draw the same as serially, including slivers and off-screen vertices", [](TestCase &t)
+        {
+            // Batched triangles take the chunked path with per-row column bounds; drawn one by one they take the
+            // per-pixel path. Thin slivers and vertices far outside the scissor stress the column bounds,
+            // filtered STQ sampling, shading, fog and depth the chunked stages.
+            auto render = [](uint32_t threads)
+            {
+                std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+                uint32_t seed = 0x2468ACEu;
+                auto next = [&seed]()
+                {
+                    seed = seed * 1664525u + 1013904223u;
+                    return seed >> 8u;
+                };
+                for (uint8_t &byte : vram)
+                    byte = static_cast<uint8_t>(next());
+
+                GSCpuBackend gs;
+                gs.Initialize(vram.data(), static_cast<uint32_t>(vram.size()));
+                gs.SetRasterThreads(threads);
+                for (int i = 0; i < 400; ++i)
+                {
+                    GSPrimitiveBatch batch{};
+                    GSDrawState &state = batch.state;
+                    auto &ctx = state.context;
+                    ctx.frame.fbp = 0u;
+                    ctx.frame.fbw = 10u;
+                    ctx.frame.psm = GS_PSM_CT32;
+                    ctx.zbuf.zbp = 160u;
+                    ctx.zbuf.psm = GS_PSM_Z16S;
+                    ctx.scissor = {0u, 639u, 0u, 447u};
+                    ctx.xyoffset.ofx = 2048u << 4u;
+                    ctx.xyoffset.ofy = 2048u << 4u;
+                    ctx.test = (static_cast<uint64_t>(1u + next() % 3u) << 17u) | (1ull << 16u);
+                    ctx.alpha = 0x80ull << 32u | 0x44u;
+                    ctx.clamp = next() % 2u;
+                    ctx.tex0.tbp0 = 11000u;
+                    ctx.tex0.tbw = 2u;
+                    ctx.tex0.psm = GS_PSM_CT32;
+                    ctx.tex0.tcc = 1u;
+                    ctx.tex0.tfx = static_cast<uint8_t>(next() % 4u);
+                    state.textureWidth = 128u;
+                    state.textureHeight = 128u;
+                    state.linearFilter = (next() % 2u) != 0u;
+                    state.prim.type = GS_PRIM_TRIANGLE;
+                    state.prim.tme = true;
+                    state.prim.fst = (next() % 4u) == 0u;
+                    state.prim.iip = (next() % 2u) != 0u;
+                    state.prim.abe = (next() % 2u) != 0u;
+                    state.prim.fge = (next() % 3u) == 0u;
+                    batch.vertexCount = 3u;
+                    const bool sliver = (next() % 4u) == 0u;
+                    for (int v = 0; v < 3; ++v)
+                    {
+                        GSVertex &vertex = batch.vertices[static_cast<size_t>(v)];
+                        // Mostly on screen, sometimes hundreds of pixels outside it.
+                        const float spread = (next() % 5u) == 0u ? 1600.0f : 700.0f;
+                        vertex.x = 2048.0f - 200.0f + static_cast<float>(next() % 1000u) / 1000.0f * spread + static_cast<float>(next() % 16u) / 16.0f;
+                        vertex.y = 2048.0f - 150.0f + static_cast<float>(next() % 1000u) / 1000.0f * spread * 0.7f;
+                        if (sliver && v == 2)
+                        {
+                            vertex.x = batch.vertices[0].x + static_cast<float>(next() % 3u) * 0.37f;
+                            vertex.y = batch.vertices[1].y + 0.5f;
+                        }
+                        vertex.z = static_cast<double>(next() % 0xFFFFu);
+                        vertex.r = static_cast<uint8_t>(next());
+                        vertex.g = static_cast<uint8_t>(next());
+                        vertex.b = static_cast<uint8_t>(next());
+                        vertex.a = static_cast<uint8_t>(next());
+                        vertex.fog = static_cast<uint8_t>(next());
+                        vertex.q = 0.5f + static_cast<float>(next() % 1000u) / 500.0f;
+                        vertex.s = static_cast<float>(next() % 1000u) / 500.0f * vertex.q;
+                        vertex.t = static_cast<float>(next() % 1000u) / 500.0f * vertex.q;
+                        vertex.u = static_cast<uint16_t>(next() % (128u * 16u));
+                        vertex.v = static_cast<uint16_t>(next() % (128u * 16u));
+                    }
+                    gs.Submit(batch);
+                }
+                gs.Flush();
+                return vram;
+            };
+
+            const std::vector<uint8_t> serial = render(1u);
+            t.IsTrue(serial == render(4u), "batched triangles must draw exactly what serial drawing does");
+        });
+
+        tc.Run("GS runs of self-sampling RGB24 primitives batched together draw the same in parallel", [](TestCase &t)
+        {
+            // Runs of overlapping T8H/T4HL/T4HH sprites and triangles that sample the top byte of the RGB24
+            // frame they draw into, mixed with ordinary textured primitives and palette loads from VRAM, and
+            // ended by an RGB24 read of the sampled texels that shows which page the texture buffer holds.
+            auto render = [](uint32_t threads, bool async)
+            {
+                std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+                uint32_t seed = 0x13579BDu;
+                auto next = [&seed]()
+                {
+                    seed = seed * 1664525u + 1013904223u;
+                    return seed >> 8u;
+                };
+                for (uint8_t &byte : vram)
+                    byte = static_cast<uint8_t>(next());
+
+                GSCpuBackend gs;
+                gs.Initialize(vram.data(), static_cast<uint32_t>(vram.size()));
+                gs.SetRasterThreads(threads);
+                gs.SetAsync(async);
+                auto loadClut = [&](uint32_t psm)
+                {
+                    GSTex0Reg clutTex{};
+                    clutTex.psm = static_cast<uint8_t>(psm);
+                    clutTex.cpsm = GS_PSM_CT32;
+                    clutTex.cbp = 13000u + (next() % 4u) * 64u;
+                    clutTex.cld = 1u;
+                    gs.LoadClut(clutTex, GSTexClutReg{});
+                };
+                loadClut(GS_PSM_T8H);
+
+                auto baseState = [&](GSPrimitiveBatch &batch)
+                {
+                    GSDrawState &state = batch.state;
+                    auto &ctx = state.context;
+                    ctx.frame.fbp = 0u;
+                    ctx.frame.fbw = 10u;
+                    ctx.frame.psm = GS_PSM_CT24;
+                    ctx.zbuf.zbp = 160u;
+                    ctx.zbuf.psm = GS_PSM_Z24;
+                    ctx.zbuf.zmask = (next() % 3u) == 0u;
+                    ctx.scissor = {0u, 639u, 0u, 447u};
+                    ctx.test = (static_cast<uint64_t>(1u + next() % 3u) << 17u) | (1ull << 16u);
+                    ctx.alpha = 0x80ull << 32u | 0x44u;
+                    ctx.tex0.tbw = 10u;
+                    ctx.tex0.tcc = 1u;
+                    ctx.tex0.cpsm = GS_PSM_CT32;
+                    state.textureWidth = 1024u;
+                    state.textureHeight = 512u;
+                    state.prim.tme = true;
+                    state.prim.fst = true;
+                };
+                auto setVertices = [&](GSPrimitiveBatch &batch, bool sprite, uint32_t x0, uint32_t y0, uint32_t w, uint32_t h,
+                                       uint32_t u0, uint32_t v0)
+                {
+                    batch.state.prim.type = sprite ? GS_PRIM_SPRITE : GS_PRIM_TRIANGLE;
+                    batch.vertexCount = sprite ? 2u : 3u;
+                    const uint32_t xs[3] = {x0, x0 + w, sprite ? 0u : x0};
+                    const uint32_t ys[3] = {y0, y0 + h, sprite ? 0u : y0 + h};
+                    const uint32_t us[3] = {u0, u0 + w, u0};
+                    const uint32_t vs[3] = {v0, v0 + h, v0 + h};
+                    for (int v = 0; v < 3; ++v)
+                    {
+                        GSVertex &vertex = batch.vertices[static_cast<size_t>(v)];
+                        vertex.x = static_cast<float>(sprite || v != 1 ? xs[v] : x0 + w);
+                        vertex.y = static_cast<float>(sprite || v != 1 ? ys[v] : y0);
+                        vertex.z = static_cast<double>(next() % 0xFFFFFFu);
+                        vertex.r = static_cast<uint8_t>(next());
+                        vertex.g = static_cast<uint8_t>(next());
+                        vertex.b = static_cast<uint8_t>(next());
+                        vertex.a = static_cast<uint8_t>(next());
+                        vertex.u = static_cast<uint16_t>(us[v] * 16u);
+                        vertex.v = static_cast<uint16_t>(vs[v] * 16u);
+                    }
+                };
+
+                for (int round = 0; round < 48; ++round)
+                {
+                    const uint32_t blockOffset = (next() % 3u) * 32u * 10u;
+                    const uint32_t topFormats[3] = {GS_PSM_T8H, GS_PSM_T4HL, GS_PSM_T4HH};
+                    const uint32_t run = 1u + next() % 8u;
+                    // The texel each run samples last, which is on the page the texture buffer ends on.
+                    uint32_t lastU = 0u, lastV = 0u;
+                    auto drawAlias = [&](uint32_t texturePsm, bool sprite, uint32_t x0, uint32_t y0, uint32_t w, uint32_t h,
+                                         uint32_t u0, uint32_t v0, bool linear)
+                    {
+                        GSPrimitiveBatch alias{};
+                        baseState(alias);
+                        alias.state.prim.abe = (next() % 2u) != 0u;
+                        alias.state.prim.iip = (next() % 2u) != 0u;
+                        alias.state.linearFilter = linear;
+                        alias.state.context.tex0.psm = static_cast<uint8_t>(texturePsm);
+                        alias.state.context.tex0.tbp0 = blockOffset;
+                        alias.state.context.tex0.tfx = static_cast<uint8_t>(next() % 2u);
+                        setVertices(alias, sprite, x0, y0, w, h, u0, v0);
+                        gs.Submit(alias);
+                        // Sprites end bottom right; these triangles end on their bottom-left corner.
+                        lastU = sprite ? u0 + w - 1u : u0;
+                        lastV = v0 + h - 1u;
+                    };
+                    uint32_t texturePsm = GS_PSM_T8H;
+                    for (uint32_t k = 0; k < run; ++k)
+                    {
+                        texturePsm = topFormats[next() % 3u];
+                        if ((next() % 3u) == 0u)
+                            loadClut(texturePsm);
+                        if ((next() % 4u) == 0u)
+                        {
+                            // An ordinary primitive sampling a texture far from the frame joins the run.
+                            GSPrimitiveBatch plain{};
+                            baseState(plain);
+                            plain.state.context.tex0.psm = GS_PSM_CT32;
+                            plain.state.context.tex0.tbp0 = 11000u;
+                            plain.state.context.tex0.tbw = 2u;
+                            plain.state.textureWidth = 128u;
+                            plain.state.textureHeight = 128u;
+                            plain.state.prim.abe = true;
+                            setVertices(plain, (next() % 2u) != 0u, next() % 500u, next() % 380u, 64u + next() % 64u,
+                                        64u + next() % 32u, next() % 60u, next() % 60u);
+                            gs.Submit(plain);
+                        }
+                        const uint32_t x0 = next() % 500u;
+                        const uint32_t y0 = next() % 380u;
+                        const uint32_t w = 64u + next() % 120u;
+                        const uint32_t h = 64u + next() % 60u;
+                        const bool overlay = (next() % 3u) != 0u;
+                        drawAlias(texturePsm, (next() % 2u) != 0u, x0, y0, w, h, overlay ? x0 : next() % 500u, overlay ? y0 : next() % 380u,
+                                  (next() % 3u) == 0u);
+                    }
+                    const uint32_t tileX = lastU & ~63u;
+                    const uint32_t tileY = lastV & ~31u;
+                    const uint32_t ending = next() % 3u;
+                    if (ending == 0u)
+                    {
+                        // A palette load, then a sprite that samples only the page the run ended on: the load
+                        // is the cache's last switch away from that page.
+                        loadClut(texturePsm);
+                        drawAlias(texturePsm, true, tileX + 8u, tileY + 4u, 40u, 20u, tileX + 8u, tileY + 4u, false);
+                    }
+                    else if (ending == 1u && tileX >= 64u)
+                    {
+                        // A filtered sprite across the left edge of that page, sampling one texel to the left of
+                        // each pixel: the pixel on the edge reads the page to the left, then this one, and draws
+                        // into this one, so the last switch happens inside a pixel.
+                        drawAlias(texturePsm, true, tileX - 8u, tileY + 4u, 40u, 20u, tileX - 9u, tileY + 4u, true);
+                        lastU = tileX;
+                    }
+
+                    // Copy, through RGB24, the whole page holding the texel the run sampled last (where the
+                    // texture buffer ends) and one at random into a buffer of their own, one row of pages per round.
+                    for (int k = 0; k < 2; ++k)
+                    {
+                        GSPrimitiveBatch probe{};
+                        baseState(probe);
+                        probe.state.prim.type = GS_PRIM_SPRITE;
+                        probe.state.context.frame.fbp = 415u;
+                        probe.state.context.frame.fbw = 2u;
+                        probe.state.context.tex0.psm = GS_PSM_CT24;
+                        probe.state.context.tex0.tbp0 = blockOffset;
+                        probe.state.context.tex0.tfx = 1u;
+                        probe.state.context.zbuf.zmask = true;
+                        probe.state.context.test = 0x30000ull;
+                        probe.state.context.scissor = {0u, 127u, 0u, 1535u};
+                        probe.state.prim.abe = false;
+                        probe.vertexCount = 2u;
+                        const uint32_t pu = (k == 0 ? lastU : next() % 640u) & ~63u;
+                        const uint32_t pv = (k == 0 ? lastV : next() % 448u) & ~31u;
+                        const uint32_t px = static_cast<uint32_t>(k) * 64u;
+                        const uint32_t py = static_cast<uint32_t>(round) * 32u;
+                        probe.vertices[0].x = static_cast<float>(px);
+                        probe.vertices[0].y = static_cast<float>(py);
+                        probe.vertices[1].x = static_cast<float>(px + 64u);
+                        probe.vertices[1].y = static_cast<float>(py + 32u);
+                        probe.vertices[1].r = probe.vertices[1].g = probe.vertices[1].b = probe.vertices[1].a = 0x80u;
+                        probe.vertices[0].u = static_cast<uint16_t>(pu * 16u);
+                        probe.vertices[0].v = static_cast<uint16_t>(pv * 16u);
+                        probe.vertices[1].u = static_cast<uint16_t>((pu + 64u) * 16u);
+                        probe.vertices[1].v = static_cast<uint16_t>((pv + 32u) * 16u);
+                        gs.Submit(probe);
+                    }
+                    if (round % 13 == 12)
+                        gs.TextureFlush();
+                }
+                std::vector<uint8_t> out;
+                gs.SnapshotVram(out);
+                return out;
+            };
+
+            const std::vector<uint8_t> serial = render(1u, false);
+            t.IsTrue(serial == render(4u, false), "batched self-sampling draws must leave VRAM and the texture buffer as serially");
+            t.IsTrue(serial == render(3u, false), "any number of row ranges must leave VRAM and the texture buffer as serially");
+            t.IsTrue(serial == render(4u, true), "a GS thread must leave VRAM and the texture buffer as serially");
+        });
+
+        tc.Run("GS thread presentation shows the frame finished at the latest vblank it reached", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GSRegisters regs{};
+            regs.pmode = 0x1ull;
+            regs.dispfb1 = 10ull << 9u;
+            regs.display1 = (639ull << 32u) | (447ull << 44u);
+
+            GSCpuBackend gs;
+            gs.Initialize(vram.data(), static_cast<uint32_t>(vram.size()));
+            gs.SetAsync(true);
+            gs.SetDisplayRegisters(&regs);
+
+            auto sprite = [&gs](uint32_t fbp, uint8_t r, bool blend)
+            {
+                GSPrimitiveBatch batch{};
+                batch.state.prim.type = GS_PRIM_SPRITE;
+                batch.state.prim.abe = blend;
+                batch.state.context.frame.fbp = fbp;
+                batch.state.context.frame.fbw = 10u;
+                batch.state.context.frame.psm = GS_PSM_CT32;
+                batch.state.context.scissor = {0u, 639u, 0u, 447u};
+                batch.state.context.zbuf.zmask = 1u;
+                batch.state.context.test = (1ull << 17u) | (1ull << 16u);
+                batch.state.context.alpha = 0x80ull << 32u | 0x44u;
+                batch.vertexCount = 2u;
+                batch.vertices[0].x = 0.0f;
+                batch.vertices[0].y = 0.0f;
+                batch.vertices[1].x = 640.0f;
+                batch.vertices[1].y = 448.0f;
+                for (GSVertex &vertex : batch.vertices)
+                {
+                    vertex.r = r;
+                    vertex.a = 0x40u;
+                }
+                gs.Submit(batch);
+            };
+
+            sprite(0u, 0xFFu, false);
+            regs.vsyncTick.store(1u);
+            sprite(150u, 0x00u, false);
+            std::vector<uint8_t> settled;
+            gs.SnapshotVram(settled);
+
+            // After the vblank the guest redraws the displayed buffer while the GS thread has a backlog.
+            sprite(0u, 0x00u, false);
+            for (int i = 0; i < 400; ++i)
+                sprite(150u, static_cast<uint8_t>(i), true);
+
+            GSPresentationRequest request{};
+            request.pmode = regs.pmode;
+            request.dispfb1 = regs.dispfb1;
+            request.display1 = regs.display1;
+            const PresentationFrame during = gs.Present(request);
+            t.IsTrue(!during.pixels.empty(), "presentation should produce a frame while the GS thread is busy");
+            t.Equals(static_cast<uint32_t>(during.pixels[0]), 0xFFu,
+                     "a lagging GS thread must present the buffer as it was at the vblank, not the one being redrawn");
+
+            gs.SnapshotVram(settled);
+            const PresentationFrame after = gs.Present(request);
+            t.Equals(static_cast<uint32_t>(after.pixels[0]), 0x00u, "once drained, presentation should show live memory");
+        });
+
+        tc.Run("GS thread presentation prefers the capture taken at the requested vblank even when drained", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GSRegisters regs{};
+            regs.pmode = 0x1ull;
+            regs.dispfb1 = 10ull << 9u;
+            regs.display1 = (639ull << 32u) | (447ull << 44u);
+
+            GSCpuBackend gs;
+            gs.Initialize(vram.data(), static_cast<uint32_t>(vram.size()));
+            gs.SetAsync(true);
+            gs.SetDisplayRegisters(&regs);
+
+            auto sprite = [&gs](uint32_t fbp, uint8_t r)
+            {
+                GSPrimitiveBatch batch{};
+                batch.state.prim.type = GS_PRIM_SPRITE;
+                batch.state.context.frame.fbp = fbp;
+                batch.state.context.frame.fbw = 10u;
+                batch.state.context.frame.psm = GS_PSM_CT32;
+                batch.state.context.scissor = {0u, 639u, 0u, 447u};
+                batch.state.context.zbuf.zmask = 1u;
+                batch.state.context.test = (1ull << 17u) | (1ull << 16u);
+                batch.vertexCount = 2u;
+                batch.vertices[0].x = 0.0f;
+                batch.vertices[0].y = 0.0f;
+                batch.vertices[1].x = 640.0f;
+                batch.vertices[1].y = 448.0f;
+                for (GSVertex &vertex : batch.vertices)
+                {
+                    vertex.r = r;
+                    vertex.a = 0x80u;
+                }
+                gs.Submit(batch);
+            };
+
+            // Frame drawn before the vblank, then the game clears the still-displayed buffer right after it.
+            sprite(0u, 0xFFu);
+            regs.vsyncTick.store(1u);
+            sprite(0u, 0x00u);
+            std::vector<uint8_t> settled;
+            gs.SnapshotVram(settled);
+
+            GSPresentationRequest request{};
+            request.pmode = regs.pmode;
+            request.dispfb1 = regs.dispfb1;
+            request.display1 = regs.display1;
+            request.vsyncTick = 1u;
+            const PresentationFrame atVblank = gs.Present(request);
+            t.IsTrue(!atVblank.pixels.empty(), "presentation should produce a frame");
+            t.Equals(static_cast<uint32_t>(atVblank.pixels[0]), 0xFFu,
+                     "the capture taken at the requested vblank must win over memory the game already cleared");
+
+            request.vsyncTick = 2u;
+            const PresentationFrame later = gs.Present(request);
+            t.Equals(static_cast<uint32_t>(later.pixels[0]), 0x00u,
+                     "a tick with no capture yet and a drained queue presents live memory");
+        });
+
+        tc.Run("GS texture page buffer also hides draws into the cached page until TEXFLUSH", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            constexpr uint32_t kTextureTbp = 32u; // Physical GS page 1, which the second pass renders into.
+            constexpr uint64_t kFrameOutput = (2ull << 0) | (1ull << 16) | (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kFrameTexturePage = (1ull << 0) | (1ull << 16) | (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kTex0 =
+                (static_cast<uint64_t>(kTextureTbp) << 0) |
+                (1ull << 14) |
+                (static_cast<uint64_t>(GS_PSM_CT32) << 20) |
+                (1ull << 34) |
+                (1ull << 35);
+            constexpr uint32_t kInitialColor = 0x80112233u;
+
+            gs.WriteVram(GS_PSM_CT32, kTextureTbp, 1u, 0u, 0u, kInitialColor);
+            gs.writeRegister(GS_REG_ZBUF_1, 1ull << 32);
+            gs.writeRegister(GS_REG_SCISSOR_1, (3ull << 16) | (3ull << 48));
+            gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
+            gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
+            gs.writeRegister(GS_REG_ALPHA_1, 0ull);
+            gs.writeRegister(GS_REG_TEX0_1, kTex0);
+
+            const auto drawPixel = [&gs](uint64_t frame, bool textured, uint32_t x)
+            {
+                gs.writeRegister(GS_REG_FRAME_1, frame);
+                gs.writeRegister(GS_REG_PRIM, static_cast<uint64_t>(GS_PRIM_SPRITE) | (textured ? (1ull << 4) : 0ull) | (1ull << 8));
+                gs.writeRegister(GS_REG_RGBAQ, 0x80FFEEDDull);
+                gs.writeRegister(GS_REG_UV, 0ull);
+                gs.writeRegister(GS_REG_XYZ2, static_cast<uint64_t>(x * 16u));
+                gs.writeRegister(GS_REG_UV, 0ull);
+                gs.writeRegister(GS_REG_XYZ2, static_cast<uint64_t>((x + 1u) * 16u) | (16ull << 16u));
+            };
+
+            drawPixel(kFrameOutput, true, 0u);       // loads texture page 1 into the page buffer
+            drawPixel(kFrameTexturePage, false, 0u); // overwrites the texel by rendering into page 1
+            drawPixel(kFrameOutput, true, 1u);       // still served from the buffered page
+            gs.writeRegister(GS_REG_TEXFLUSH, 0ull);
+            drawPixel(kFrameOutput, true, 2u);
+
+            t.Equals(gs.ReadVram(GS_PSM_CT32, 64u, 1u, 0u, 0u), kInitialColor, "the first sample should read the original texel");
+            t.Equals(gs.ReadVram(GS_PSM_CT32, 32u, 1u, 0u, 0u), 0x80FFEEDDu, "the untextured pass should have drawn into page 1");
+            t.Equals(gs.ReadVram(GS_PSM_CT32, 64u, 1u, 1u, 0u), kInitialColor,
+                     "a draw into the cached page must stay hidden from texture reads until TEXFLUSH");
+            t.Equals(gs.ReadVram(GS_PSM_CT32, 64u, 1u, 2u, 0u), 0x80FFEEDDu,
+                     "TEXFLUSH must expose the page the GS rendered into");
         });
 
         tc.Run("GS texture page buffer hides local-memory writes until TEXFLUSH", [](TestCase &t)
@@ -3552,6 +4977,87 @@ void register_ps2_gs_tests()
                      "linear filtering should preserve the shared opaque alpha from the CLUT entries");
         });
 
+        tc.Run("FST sprite bilinear magnification clamps and blends texels per column and row", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            constexpr uint32_t kTexTbp = 64u;
+            constexpr uint64_t kFrame = (1ull << 16) | (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kZbuf = (1ull << 32);
+            constexpr uint64_t kTex0 =
+                (static_cast<uint64_t>(kTexTbp) << 0) |
+                (1ull << 14) |
+                (static_cast<uint64_t>(GS_PSM_CT32) << 20) |
+                (2ull << 26) |
+                (2ull << 30) |
+                (1ull << 34);
+            constexpr uint64_t kPrim = static_cast<uint64_t>(GS_PRIM_SPRITE) | (1ull << 4) | (1ull << 8);
+            uint32_t texels[4][4];
+            for (uint32_t y = 0u; y < 4u; ++y)
+                for (uint32_t x = 0u; x < 4u; ++x)
+                {
+                    texels[y][x] = 0x80000000u | ((x * 70u + y * 9u) & 0xFFu) | (((y * 80u + 5u) & 0xFFu) << 8) |
+                                   (((x * 13u + y * 50u) & 0xFFu) << 16);
+                    writeReferencePSMCT32Pixel(vram, kTexTbp, 1u, x, y, texels[y][x]);
+                }
+
+            gs.writeRegister(GS_REG_FRAME_1, kFrame);
+            gs.writeRegister(GS_REG_ZBUF_1, kZbuf);
+            gs.writeRegister(GS_REG_SCISSOR_1, (7ull << 16) | (7ull << 48));
+            gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
+            gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
+            gs.writeRegister(GS_REG_ALPHA_1, 0ull);
+            gs.writeRegister(GS_REG_TEX0_1, kTex0 | (1ull << 35)); // DECAL: output the filtered texel
+            gs.writeRegister(GS_REG_TEX1_1, 1ull << 5);            // MMAG linear
+            gs.writeRegister(GS_REG_CLAMP_1, 1ull);                 // CLAMP in U, REPEAT in V
+            gs.writeRegister(GS_REG_PRIM, kPrim);
+            gs.writeRegister(GS_REG_RGBAQ, 0x80808080ull);
+            gs.writeRegister(GS_REG_UV, 0ull);
+            gs.writeRegister(GS_REG_XYZ2, 0ull);
+            gs.writeRegister(GS_REG_UV, (64ull << 0) | (64ull << 16));
+            gs.writeRegister(GS_REG_XYZ2, (static_cast<uint64_t>(8u << 4) << 0) | (static_cast<uint64_t>(8u << 4) << 16));
+
+            // 2x magnification: pixel centres land on quarter texels, so every pixel blends four texels.
+            auto axis = [](int pixel, bool clamp, int &c0, int &c1, float &frac)
+            {
+                const float texF = 0.0f + (4.0f - 0.0f) * ((static_cast<float>(pixel) + 0.5f) / 8.0f);
+                const uint16_t fixed = static_cast<uint16_t>(static_cast<int>((texF * 16.0f) + 0.5f));
+                const float sample = static_cast<float>(fixed) / 16.0f - 0.5f;
+                const int base = static_cast<int>(std::floor(sample));
+                frac = sample - static_cast<float>(base);
+                auto wrap = [&](int c) { return clamp ? std::clamp(c, 0, 3) : (c & 3); };
+                c0 = wrap(base);
+                c1 = wrap(base + 1);
+            };
+            auto lerp = [](uint32_t a, uint32_t b, uint32_t c, uint32_t d, int shift, float fx, float fy)
+            {
+                const float c00 = static_cast<float>((a >> shift) & 0xFFu);
+                const float c10 = static_cast<float>((b >> shift) & 0xFFu);
+                const float c01 = static_cast<float>((c >> shift) & 0xFFu);
+                const float c11 = static_cast<float>((d >> shift) & 0xFFu);
+                const float top = c00 + (c10 - c00) * fx;
+                const float bottom = c01 + (c11 - c01) * fx;
+                return static_cast<uint32_t>(std::clamp(static_cast<int>(std::lround(top + (bottom - top) * fy)), 0, 255)) << shift;
+            };
+            bool matches = true;
+            for (int y = 0; y < 8; ++y)
+                for (int x = 0; x < 8; ++x)
+                {
+                    int u0, u1, v0, v1;
+                    float fx, fy;
+                    axis(x, true, u0, u1, fx);
+                    axis(y, false, v0, v1, fy);
+                    uint32_t expected = 0u;
+                    for (int shift : {0, 8, 16, 24})
+                        expected |= lerp(texels[v0][u0], texels[v0][u1], texels[v1][u0], texels[v1][u1], shift, fx, fy);
+                    if (readReferencePSMCT32Pixel(vram, 0u, 1u, static_cast<uint32_t>(x), static_cast<uint32_t>(y)) != expected)
+                        matches = false;
+                }
+            t.IsTrue(matches, "every sprite pixel should be the bilinear blend of its clamped/repeated texel neighbours");
+        });
+
         tc.Run("GS CLAMP modes transform texture coordinates before sampling", [](TestCase &t)
         {
             auto renderConstantUv = [](uint64_t clampReg,
@@ -3945,6 +5451,67 @@ void register_ps2_gs_tests()
                      "triangle fan quad should light at least one framebuffer row");
         });
 
+        tc.Run("sceGsExecLoadImage passes the libgraph block address through to BITBLTBUF", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "PS2Memory initialize should succeed");
+            uint8_t *rdram = runtime.memory().getRDRAM();
+
+            // Mana Khemia fills sceGsLoadImage once, then patches BITBLTBUF in place before each upload.
+            constexpr uint32_t kImageAddr = 0x4000u;
+            constexpr uint32_t kSrcAddr = 0x5000u;
+            R5900Context defCtx{};
+            setRegU32(defCtx, 4, kImageAddr);
+            setRegU32(defCtx, 5, 0u);     // dbp
+            setRegU32(defCtx, 6, 1u);     // dbw
+            setRegU32(defCtx, 7, 0x02u);  // PSMCT16
+            setRegU32(defCtx, 8, 0u);
+            setRegU32(defCtx, 9, 0u);
+            setRegU32(defCtx, 10, 16u);
+            setRegU32(defCtx, 11, 16u);
+            ps2_stubs::sceGsSetDefLoadImage(rdram, &defCtx, &runtime);
+            uint64_t structBitbltbuf = 0u;
+            std::memcpy(&structBitbltbuf, rdram + kImageAddr + 0x10u, sizeof(structBitbltbuf));
+            t.Equals(structBitbltbuf >> 56u, 0x02ull, "sceGsSetDefLoadImage should store DPSM in the libgraph BITBLTBUF slot");
+            structBitbltbuf = (structBitbltbuf & ~(0x3FFFull << 32u)) | (11202ull << 32u);
+            std::memcpy(rdram + kImageAddr + 0x10u, &structBitbltbuf, sizeof(structBitbltbuf));
+
+            R5900Context loadCtx{};
+            setRegU32(loadCtx, 4, kImageAddr);
+            setRegU32(loadCtx, 5, kSrcAddr);
+            ps2_stubs::sceGsExecLoadImage(rdram, &loadCtx, &runtime);
+
+            uint64_t bitbltbuf = 0u;
+            std::memcpy(&bitbltbuf, rdram + runtime.guestHeapBase() + 16u, sizeof(bitbltbuf));
+            t.Equals(static_cast<uint32_t>((bitbltbuf >> 32u) & 0x3FFFu), 11202u,
+                     "BITBLTBUF.DBP should be the block address the game passed");
+        });
+
+        tc.Run("sceGsExecLoadImage sizes PSMT4HH uploads at four bits per pixel", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "PS2Memory initialize should succeed");
+            uint8_t *rdram = runtime.memory().getRDRAM();
+
+            // Mana Khemia's font sheet is a 512x512 PSMT4HH image; transfers pack it at 4 bpp.
+            constexpr uint32_t kImageAddr = 0x4000u;
+            constexpr uint32_t kSrcAddr = 0x5000u;
+            const GsImageMem image{0u, 0u, 16u, 16u, 0u, 1u, 0x2Cu};
+            writeGsImageTest(rdram, kImageAddr, image);
+            std::memset(rdram + kSrcAddr, 0x31, 16u * 16u / 2u);
+
+            R5900Context loadCtx{};
+            setRegU32(loadCtx, 4, kImageAddr);
+            setRegU32(loadCtx, 5, kSrcAddr);
+            ps2_stubs::sceGsExecLoadImage(rdram, &loadCtx, &runtime);
+
+            uint64_t imageTag = 0u;
+            std::memcpy(&imageTag, rdram + runtime.guestHeapBase() + 5u * 16u, sizeof(imageTag));
+            t.Equals(imageTag & 0x7FFFull, 8ull, "a 16x16 PSMT4HH image is 128 bytes, eight quadwords");
+            t.Equals(runtime.gs().ReadVram(0x2Cu, 0u, 1u, 0u, 0u), 1u, "the first texel should land in the high nibble plane");
+            t.Equals(runtime.gs().ReadVram(0x2Cu, 0u, 1u, 1u, 0u), 3u, "the second texel comes from the upper half of the byte");
+        });
+
         tc.Run("sceGsExecLoadImage and sceGsExecStoreImage roundtrip and free guest packets", [](TestCase &t)
         {
             PS2Runtime runtime;
@@ -4116,6 +5683,99 @@ void register_ps2_gs_tests()
                       "TRXDIR payload must encode dir=0 (host-to-local)");
         });
 
+        tc.Run("sceGifPk HLE stubs leave the open DMA tag QWC to a recompiled Terminate", [](TestCase &t)
+        {
+            // Mana Khemia's movie strip upload builds its chain with recompiled sceGifPkCnt/Terminate
+            // around HLE sceGifPkAddGsAD/CloseGifTag; Terminate adds the QWC, as libpkt does.
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            PS2Runtime runtime;
+            R5900Context ctx{};
+
+            constexpr uint32_t stateAddr = 0x1000u;
+            constexpr uint32_t tagAddr = 0x2000u;
+            auto writeWord = [&](uint32_t addr, uint32_t value)
+            { std::memcpy(rdram.data() + addr, &value, sizeof(value)); };
+            auto readWord = [&](uint32_t addr)
+            {
+                uint32_t value = 0u;
+                std::memcpy(&value, rdram.data() + addr, sizeof(value));
+                return value;
+            };
+
+            // What the recompiled sceGifPkCnt leaves behind: CNT tag with QWC 0, pDmaTag set, pCurrent past it.
+            writeWord(tagAddr, 0x10000000u);
+            writeWord(stateAddr + 0u, tagAddr + 16u);
+            writeWord(stateAddr + 4u, tagAddr);
+            writeWord(stateAddr + 8u, tagAddr);
+
+            std::memset(&ctx, 0, sizeof(ctx));
+            setRegU32(ctx, 4, stateAddr);
+            ctx.r[5] = _mm_set_epi64x(0x0Eull, 0x1000000000000000ull); // A+D GIFtag, NLOOP filled on close
+            ps2_stubs::sceGifPkOpenGifTag(rdram.data(), &ctx, &runtime);
+
+            const uint32_t regs[2] = {GS_REG_BITBLTBUF, GS_REG_TRXREG};
+            for (uint32_t reg : regs)
+            {
+                std::memset(&ctx, 0, sizeof(ctx));
+                setRegU32(ctx, 4, stateAddr);
+                setRegU32(ctx, 5, reg);
+                ps2_stubs::sceGifPkAddGsAD(rdram.data(), &ctx, &runtime);
+            }
+
+            std::memset(&ctx, 0, sizeof(ctx));
+            setRegU32(ctx, 4, stateAddr);
+            ps2_stubs::sceGifPkCloseGifTag(rdram.data(), &ctx, &runtime);
+
+            t.Equals(readWord(tagAddr), 0x10000000u, "HLE GIF packet stubs must not write the open DMA tag's QWC");
+            t.Equals(readWord(tagAddr + 16u) & 0x7FFFu, 2u, "CloseGifTag should still set the GIFtag NLOOP");
+
+            // The recompiled sceGifPkTerminate: tag.word0 += (pCurrent - pDmaTag) / 16 - 1.
+            const uint32_t current = readWord(stateAddr);
+            writeWord(tagAddr, readWord(tagAddr) + ((current - tagAddr) >> 4u) - 1u);
+            t.Equals(readWord(tagAddr), 0x10000003u, "Terminate should leave QWC 3 (GIFtag + two A+D), not double it");
+        });
+
+        tc.Run("sceGifPk HLE Terminate still sets the QWC of an all-HLE chain", [](TestCase &t)
+        {
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            PS2Runtime runtime;
+            R5900Context ctx{};
+
+            constexpr uint32_t stateAddr = 0x1000u;
+            constexpr uint32_t baseAddr = 0x2000u;
+
+            setRegU32(ctx, 4, stateAddr);
+            setRegU32(ctx, 5, baseAddr);
+            ps2_stubs::sceGifPkInit(rdram.data(), &ctx, &runtime);
+
+            std::memset(&ctx, 0, sizeof(ctx));
+            setRegU32(ctx, 4, stateAddr);
+            ps2_stubs::sceGifPkCnt(rdram.data(), &ctx, &runtime);
+
+            std::memset(&ctx, 0, sizeof(ctx));
+            setRegU32(ctx, 4, stateAddr);
+            ctx.r[5] = _mm_set_epi64x(0x0Eull, 0x1000000000000000ull);
+            ps2_stubs::sceGifPkOpenGifTag(rdram.data(), &ctx, &runtime);
+
+            std::memset(&ctx, 0, sizeof(ctx));
+            setRegU32(ctx, 4, stateAddr);
+            setRegU32(ctx, 5, GS_REG_TEXFLUSH);
+            ps2_stubs::sceGifPkAddGsAD(rdram.data(), &ctx, &runtime);
+
+            std::memset(&ctx, 0, sizeof(ctx));
+            setRegU32(ctx, 4, stateAddr);
+            ps2_stubs::sceGifPkCloseGifTag(rdram.data(), &ctx, &runtime);
+
+            std::memset(&ctx, 0, sizeof(ctx));
+            setRegU32(ctx, 4, stateAddr);
+            ps2_stubs::sceGifPkTerminate(rdram.data(), &ctx, &runtime);
+
+            uint32_t tagWord = 0u;
+            std::memcpy(&tagWord, rdram.data() + baseAddr, sizeof(tagWord));
+            t.Equals(tagWord & 0xFFFFu, 2u, "HLE Terminate should close the CNT tag over GIFtag + one A+D");
+            t.Equals(tagWord >> 28u, 1u, "the chain head should stay a CNT tag");
+        });
+
         tc.Run("sceGsResetGraph frees its temporary GIF packet", [](TestCase &t)
         {
             PS2Runtime runtime;
@@ -4133,6 +5793,36 @@ void register_ps2_gs_tests()
                      "sceGsResetGraph should succeed in reset mode");
             expectGuestHeapReusable(t, runtime,
                                     "sceGsResetGraph should free its temporary GIF packet");
+        });
+
+        tc.Run("sceGsResetGraph sets the CRT through SetGsCrt and honours mode 5", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            auto &gs = runtime.memory().gs();
+            gs.smode2 = 0u;
+            gs.display2 = 0x1234ull;
+
+            resetGraphForTest(rdram, runtime, 1u, 0u);
+            t.Equals(gs.smode2, 1ull, "ResetGraph(0, interlace, NTSC, field) should program SMODE2 like SetGsCrt");
+            t.Equals(gs.display2, 0x1234ull, "ResetGraph should not invent a DISPLAY; the display env sets it");
+
+            // Mode 5 changes the CRT parameters without a reset; libgraph's zbuf placement follows them.
+            R5900Context ctx{};
+            setRegU32(ctx, 4, 5u);
+            setRegU32(ctx, 5, 0u);
+            setRegU32(ctx, 6, 2u);
+            setRegU32(ctx, 7, 0u);
+            ps2_stubs::sceGsResetGraph(rdram.data(), &ctx, &runtime);
+            R5900Context zctx{};
+            setRegU32(zctx, 4, GS_PSM_CT32);
+            setRegU32(zctx, 5, 640u);
+            setRegU32(zctx, 6, 448u);
+            ps2_stubs::sceGszbufaddr(rdram.data(), &zctx, &runtime);
+            t.Equals(getRegU32Test(zctx, 2), 280u, "mode 5 should switch libgraph to progressive (two buffers)");
+            t.Equals(gs.smode2, 0ull, "mode 5 should reprogram SMODE2 too");
+            resetGraphForTest(rdram, runtime, 1u, 1u);
         });
 
         tc.Run("sceGsSyncV resumes through the scheduler with deterministic field parity", [](TestCase &t)

@@ -1,5 +1,7 @@
 include(CheckIPOSupported)
 
+option(PS2X_ENABLE_LTO "Link Release targets with interprocedural optimization" ON)
+
 check_ipo_supported(RESULT IPO_SUPPORTED OUTPUT IPO_ERROR)
 
 function(EnableFastReleaseMode TargetName)
@@ -32,6 +34,11 @@ function(EnableFastReleaseMode TargetName)
                 >
             )
         endif()
+    endif()
+
+    # ThinLTO over thousands of generated functions needs many GB per link; iteration builds turn it off.
+    if(NOT PS2X_ENABLE_LTO)
+        return()
     endif()
 
     if(IPO_SUPPORTED)

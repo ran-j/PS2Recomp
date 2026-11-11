@@ -156,6 +156,107 @@ static bool writeMinimalMipsElfWithJalFallbackTarget(const std::filesystem::path
     return writer.save(elfPath.string());
 }
 
+static bool writeMinimalMipsElfWithSwitchJumpTables(const std::filesystem::path &elfPath)
+{
+    ELFIO::elfio writer;
+    writer.create(ELFIO::ELFCLASS32, ELFIO::ELFDATA2LSB);
+    writer.set_os_abi(ELFIO::ELFOSABI_NONE);
+    writer.set_type(ELFIO::ET_EXEC);
+    writer.set_machine(ELFIO::EM_MIPS);
+    writer.set_entry(0x00100000u);
+
+    ELFIO::section *text = writer.sections.add(".text");
+    text->set_type(ELFIO::SHT_PROGBITS);
+    text->set_flags(ELFIO::SHF_ALLOC | ELFIO::SHF_EXECINSTR);
+    text->set_addr_align(4);
+    text->set_address(0x00100000u);
+
+    std::array<uint32_t, 64> textWords{};
+    textWords[0] = 0x0C040008u; // jal 0x00100020 (switch with lui/addiu base)
+    textWords[2] = 0x0C040020u; // jal 0x00100080 (switch with offset folded into lw)
+    textWords[4] = 0x03E00008u; // jr ra
+
+    // Function at 0x00100020 whose table repeats its epilogue label, which
+    // on its own looks exactly like a leaf function entry.
+    textWords[8] = 0x27BDFFF0u;  // addiu sp,sp,-0x10
+    textWords[9] = 0xFFBF0000u;  // sd ra,0(sp)
+    textWords[10] = 0x3C0E0020u; // lui t6,0x20
+    textWords[11] = 0x00047880u; // sll t7,a0,2
+    textWords[12] = 0x25CE0010u; // addiu t6,t6,0x10 (table at 0x00200010)
+    textWords[13] = 0x01EE7821u; // addu t7,t7,t6
+    textWords[14] = 0x8DEF0000u; // lw t7,0(t7)
+    textWords[15] = 0x01E00008u; // jr t7
+    textWords[17] = 0x24020001u; // case 0x00100044: addiu v0,zero,1
+    textWords[18] = 0x24020002u; // case 0x00100048: addiu v0,zero,2
+    textWords[19] = 0xDFBF0000u; // ld ra,0(sp)
+    textWords[20] = 0x03E00008u; // case 0x00100050 (epilogue): jr ra
+    textWords[21] = 0x27BD0010u; // addiu sp,sp,0x10 (delay slot)
+    textWords[22] = 0x24020003u; // case 0x00100058: addiu v0,zero,3
+    textWords[23] = 0x1000FFFBu; // b 0x0010004C
+
+    // Function at 0x00100080 addressing its table as lw t7,0x40(base).
+    textWords[32] = 0x3C0E0020u; // lui t6,0x20
+    textWords[33] = 0x00047880u; // sll t7,a0,2
+    textWords[34] = 0x01CF7821u; // addu t7,t6,t7
+    textWords[35] = 0x8DEF0040u; // lw t7,0x40(t7) (table at 0x00200040)
+    textWords[36] = 0x01E00008u; // jr t7
+    textWords[38] = 0x03E00008u; // case 0x00100098 (epilogue): jr ra
+    textWords[40] = 0x24020005u; // case 0x001000A0: addiu v0,zero,5
+    textWords[41] = 0x03E00008u; // jr ra
+
+    // Callbacks reachable only through the pointer table after the first switch table.
+    textWords[48] = 0x27BDFFF0u; // 0x001000C0: addiu sp,sp,-0x10
+    textWords[49] = 0xFFBF0000u; // sd ra,0(sp)
+    textWords[50] = 0xDFBF0000u; // ld ra,0(sp)
+    textWords[51] = 0x03E00008u; // jr ra
+    textWords[52] = 0x27BD0010u; // addiu sp,sp,0x10
+    textWords[56] = 0x27BDFFF0u; // 0x001000E0: addiu sp,sp,-0x10
+    textWords[57] = 0xFFBF0000u; // sd ra,0(sp)
+    textWords[58] = 0xDFBF0000u; // ld ra,0(sp)
+    textWords[59] = 0x03E00008u; // jr ra
+    textWords[60] = 0x27BD0010u; // addiu sp,sp,0x10
+
+    text->set_data(reinterpret_cast<const char *>(textWords.data()),
+                   static_cast<ELFIO::Elf_Word>(textWords.size() * sizeof(uint32_t)));
+
+    ELFIO::section *rodata = writer.sections.add(".rodata");
+    rodata->set_type(ELFIO::SHT_PROGBITS);
+    rodata->set_flags(ELFIO::SHF_ALLOC);
+    rodata->set_addr_align(4);
+    rodata->set_address(0x00200000u);
+
+    std::array<uint32_t, 24> rodataWords{};
+    rodataWords[4] = 0x00100044u; // switch table at 0x00200010
+    rodataWords[5] = 0x00100048u;
+    rodataWords[6] = 0x00100058u;
+    rodataWords[7] = 0x00100050u;
+    rodataWords[8] = 0x00100050u;
+    rodataWords[9] = 0x00100050u;
+    rodataWords[10] = 0x00100050u;
+    rodataWords[11] = 0x001000C0u; // callback table directly after it
+    rodataWords[12] = 0x001000E0u;
+    rodataWords[16] = 0x001000A0u; // switch table at 0x00200040
+    rodataWords[17] = 0x00100098u;
+    rodataWords[18] = 0x00100098u;
+    rodataWords[19] = 0x00100098u;
+    rodata->set_data(reinterpret_cast<const char *>(rodataWords.data()),
+                     static_cast<ELFIO::Elf_Word>(rodataWords.size() * sizeof(uint32_t)));
+
+    ELFIO::segment *textSegment = writer.segments.add();
+    textSegment->set_type(ELFIO::PT_LOAD);
+    textSegment->set_flags(ELFIO::PF_R | ELFIO::PF_X);
+    textSegment->set_align(0x1000);
+    textSegment->add_section_index(text->get_index(), text->get_addr_align());
+
+    ELFIO::segment *rodataSegment = writer.segments.add();
+    rodataSegment->set_type(ELFIO::PT_LOAD);
+    rodataSegment->set_flags(ELFIO::PF_R);
+    rodataSegment->set_align(0x1000);
+    rodataSegment->add_section_index(rodata->get_index(), rodata->get_addr_align());
+
+    return writer.save(elfPath.string());
+}
+
 static bool writeMinimalMipsElfWithVuMicroprogramSection(const std::filesystem::path &elfPath)
 {
     ELFIO::elfio writer;
@@ -329,6 +430,61 @@ static bool writeMinimalMipsElfWithStandaloneEntryBlock(const std::filesystem::p
     return writer.save(elfPath.string());
 }
 
+static bool writeMinimalMipsElfWithDelaySlotOnNextFunction(const std::filesystem::path &elfPath)
+{
+    ELFIO::elfio writer;
+    writer.create(ELFIO::ELFCLASS32, ELFIO::ELFDATA2LSB);
+    writer.set_os_abi(ELFIO::ELFOSABI_NONE);
+    writer.set_type(ELFIO::ET_EXEC);
+    writer.set_machine(ELFIO::EM_MIPS);
+    writer.set_entry(0x00100000u);
+
+    ELFIO::section *text = writer.sections.add(".text");
+    text->set_type(ELFIO::SHT_PROGBITS);
+    text->set_flags(ELFIO::SHF_ALLOC | ELFIO::SHF_EXECINSTR);
+    text->set_addr_align(4);
+    text->set_address(0x00100000u);
+
+    const std::array<uint32_t, 8> textWords = {
+        0x27BDFFF0u, // wrapper: addiu $sp, $sp, -0x10
+        0x08040006u, // j 0x00100018
+        0x27BD0010u, // slot_entry (also wrapper's delay slot): addiu $sp, $sp, 0x10
+        0x03E00008u, // jr $ra
+        0x00000000u, // nop
+        0x00000000u, // nop
+        0x03E00008u, // target at 0x00100018: jr $ra
+        0x00000000u  // nop
+    };
+    text->set_data(reinterpret_cast<const char *>(textWords.data()),
+                   static_cast<ELFIO::Elf_Word>(textWords.size() * sizeof(uint32_t)));
+
+    ELFIO::section *strtab = writer.sections.add(".strtab");
+    strtab->set_type(ELFIO::SHT_STRTAB);
+    strtab->set_addr_align(1);
+
+    ELFIO::section *symtab = writer.sections.add(".symtab");
+    symtab->set_type(ELFIO::SHT_SYMTAB);
+    symtab->set_info(1);
+    symtab->set_link(strtab->get_index());
+    symtab->set_addr_align(4);
+    symtab->set_entry_size(writer.get_default_entry_size(ELFIO::SHT_SYMTAB));
+
+    ELFIO::symbol_section_accessor symbols(writer, symtab);
+    ELFIO::string_section_accessor strings(strtab);
+    symbols.add_symbol(strings, "", 0, 0, ELFIO::STB_LOCAL, ELFIO::STT_NOTYPE, 0, ELFIO::SHN_UNDEF);
+    symbols.add_symbol(strings, "wrapper", 0x00100000u, 8u, ELFIO::STB_GLOBAL, ELFIO::STT_FUNC, 0, text->get_index());
+    symbols.add_symbol(strings, "slot_entry", 0x00100008u, 12u, ELFIO::STB_GLOBAL, ELFIO::STT_FUNC, 0, text->get_index());
+    symbols.add_symbol(strings, "target", 0x00100018u, 8u, ELFIO::STB_GLOBAL, ELFIO::STT_FUNC, 0, text->get_index());
+
+    ELFIO::segment *textSegment = writer.segments.add();
+    textSegment->set_type(ELFIO::PT_LOAD);
+    textSegment->set_flags(ELFIO::PF_R | ELFIO::PF_X);
+    textSegment->set_align(0x1000);
+    textSegment->add_section_index(text->get_index(), text->get_addr_align());
+
+    return writer.save(elfPath.string());
+}
+
 static bool writeMinimalMipsElfWithAddressTakenCallbacks(const std::filesystem::path &elfPath,
                                                          bool includePartialDwarf = false)
 {
@@ -345,7 +501,7 @@ static bool writeMinimalMipsElfWithAddressTakenCallbacks(const std::filesystem::
     text->set_addr_align(4);
     text->set_address(0x00100000u);
 
-    std::array<uint32_t, 384> textWords{};
+    std::array<uint32_t, 448> textWords{};
     textWords[0] = 0x3C040010u;  // lui a0,0x10
     textWords[1] = 0xAC800000u;  // sw zero,0(a0)
     textWords[2] = 0x0C040008u;  // jal 0x00100020 (callback registrar)
@@ -578,6 +734,22 @@ static bool writeMinimalMipsElfWithAddressTakenCallbacks(const std::filesystem::
     textWords[373] = 0x03E00008u; // jr ra
     textWords[374] = 0x27BD0010u; // addiu sp,sp,0x10 (delay slot)
 
+    // Three leaf handlers in a row after a return, each with the next one's entry right behind its
+    // delay slot. Only the first returns inside the eight-word probe; the others return 8 and 11 words
+    // in, so nothing but the record table below names them (a real battle command table).
+    textWords[382] = 0x03E00008u; // jr ra
+    textWords[383] = 0x00000000u; // nop (delay slot)
+    const std::array<uint32_t, 8> shortHandler = {0x8C8F002Cu, 0x8DEE0000u, 0x95CF0010u, 0x25EDFFD4u,
+                                                  0x25EFFF8Eu, 0xA5CD0064u, 0x03E00008u, 0xA5CF0034u};
+    const std::array<uint32_t, 10> mediumHandler = {0x8C8F002Cu, 0x240E000Au, 0x8DED0000u, 0x95AF0010u, 0xA5AE0094u,
+                                                    0x25EEFFD4u, 0x25EFFF8Eu, 0xA5AE0064u, 0x03E00008u, 0xA5AF0034u};
+    const std::array<uint32_t, 13> longHandler = {0x8C8F002Cu, 0x8C8E25B4u, 0x8DED0000u, 0x8C8C0030u, 0x8DAF0010u,
+                                                  0xADAE0048u, 0x000F77C2u, 0x01EE7821u, 0x000F7843u, 0xA5AF0034u,
+                                                  0x858F0004u, 0x03E00008u, 0xADAF0070u};
+    std::copy(shortHandler.begin(), shortHandler.end(), textWords.begin() + 384);   // 0x00100600
+    std::copy(mediumHandler.begin(), mediumHandler.end(), textWords.begin() + 392); // 0x00100620
+    std::copy(longHandler.begin(), longHandler.end(), textWords.begin() + 402);     // 0x00100648
+
     text->set_data(reinterpret_cast<const char *>(textWords.data()),
                    static_cast<ELFIO::Elf_Word>(textWords.size() * sizeof(uint32_t)));
 
@@ -610,9 +782,18 @@ static bool writeMinimalMipsElfWithAddressTakenCallbacks(const std::filesystem::
     data->set_flags(ELFIO::SHF_ALLOC | ELFIO::SHF_WRITE);
     data->set_addr_align(4);
     data->set_address(0x00201000u);
-    std::array<uint32_t, 17> singletonCallbacks{};
+    // Eight zero words keep the records outside the 32-byte cluster window of the delay-slot pointer above.
+    std::array<uint32_t, 17 + 8 + 24> singletonCallbacks{};
     singletonCallbacks[0] = 0x00100580u;
     singletonCallbacks[16] = 0x00100588u;
+    // Six-word records {name, id, id, id, flags, handler}: code pointers 24 bytes apart, no entry
+    // inside the 32-byte cluster window with a conservative shape besides the first.
+    const std::array<uint32_t, 24> handlerRecords = {
+        0x00201000u, 0x3u, 0xEu, 0xDu, 0x10020u, 0x00100600u,
+        0x00201000u, 0x4u, 0xEu, 0xDu, 0x10020u, 0x00100620u,
+        0x00201000u, 0x3u, 0xEu, 0xDu, 0x20020u, 0x00100648u,
+        0x00201000u, 0x4u, 0xEu, 0xDu, 0x10014u, 0x0u};
+    std::copy(handlerRecords.begin(), handlerRecords.end(), singletonCallbacks.begin() + 25);
     data->set_data(reinterpret_cast<const char *>(singletonCallbacks.data()),
                    static_cast<ELFIO::Elf_Word>(singletonCallbacks.size() * sizeof(uint32_t)));
 
@@ -1152,6 +1333,50 @@ void register_ps2_recompiler_tests()
             }
         });
 
+        tc.Run("block starts after unconditional transfers become resume entries of their function", [](TestCase &t) {
+            // A merged leaf after `jr ra; sh` (as the battle handlers were), zero padding after the
+            // next return, and a call whose successor is plain fallthrough.
+            std::vector<Instruction> body;
+            body.push_back(makeJrRa(0x1000u));
+            Instruction store = makeNopLike(0x1004u);
+            store.raw = 0xA58E0034u;
+            body.push_back(store);
+            Instruction leaf = makeNopLike(0x1008u);
+            leaf.raw = 0x8C8F002Cu;
+            body.push_back(leaf);
+            body.push_back(makeJrRa(0x100Cu));
+            body.push_back(makeNopLike(0x1010u));
+            body.push_back(makeNopLike(0x1014u)); // zero padding, raw == 0
+            Instruction call = makeAbsJump(0x1018u, 0x2000u, OPCODE_JAL);
+            call.isCall = true;
+            body.push_back(call);
+            body.push_back(makeNopLike(0x101Cu));
+            Instruction after = makeNopLike(0x1020u);
+            after.raw = 0x24420001u;
+            body.push_back(after);
+            Instruction tail = makeAbsJump(0x1024u, 0x1008u, OPCODE_J);
+            body.push_back(tail);
+            body.push_back(makeNopLike(0x1028u));
+            Instruction last = makeNopLike(0x102Cu);
+            last.raw = 0x24420001u;
+            body.push_back(last);
+
+            std::vector<Function> functions{makeFunction("container", 0x1000u, 0x1030u)};
+            std::unordered_map<uint32_t, std::vector<Instruction>> decoded;
+            decoded.emplace(0x1000u, body);
+            std::unordered_map<uint32_t, std::vector<uint32_t>> targets;
+            const size_t added = PS2Recompiler::CollectPostTransferEntryTargets(functions, decoded, targets);
+
+            const auto &owner = targets[0x1000u];
+            auto has = [&owner](uint32_t address)
+            { return std::find(owner.begin(), owner.end(), address) != owner.end(); };
+            t.Equals(added, static_cast<size_t>(2), "two block starts follow a transfer and its delay slot");
+            t.IsTrue(has(0x1008u), "the instruction after `jr ra` and its delay slot is a resume entry");
+            t.IsTrue(has(0x102Cu), "the instruction after `j` and its delay slot is a resume entry");
+            t.IsFalse(has(0x1014u), "zero padding after a return is not an entry");
+            t.IsFalse(has(0x1020u), "the fallthrough after a call is not an entry");
+        });
+
         tc.Run("discovery ignores synthetic entry wrappers", [](TestCase &t) {
             std::vector<Section> sections = {
                 {".text", 0x1000u, 0x2000u, 0u, true, false, false, true, nullptr}
@@ -1471,6 +1696,48 @@ void register_ps2_recompiler_tests()
             std::filesystem::remove_all(tempRoot, removeError);
         });
 
+        tc.Run("configured stub at an undiscovered address still gets a registered wrapper", [](TestCase &t) {
+            const std::string uniqueSuffix =
+                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+            const std::filesystem::path tempRoot =
+                std::filesystem::temp_directory_path() / ("ps2recomp-stub-synthesis-" + uniqueSuffix);
+            const std::filesystem::path elfPath = tempRoot / "stub-entry.elf";
+            const std::filesystem::path configPath = tempRoot / "stub-entry.toml";
+            const std::filesystem::path outputPath = tempRoot / "output";
+            std::filesystem::create_directories(tempRoot);
+
+            // Mana Khemia only tail-calls sceDmaSend with J, so discovery never sees its start.
+            const bool elfWritten = writeMinimalMipsElfWithUnmappedEntryHint(elfPath);
+            const bool configWritten = writeRecompilerTestConfig(
+                configPath,
+                elfPath,
+                outputPath,
+                {},
+                {"InitAlarm@0x00100008", "sceDmaSend@0x00100010"});
+            t.IsTrue(elfWritten && configWritten, "stub synthesis regression inputs should be generated");
+
+            if (elfWritten && configWritten)
+            {
+                PS2Recompiler recompiler(configPath.string());
+                t.IsTrue(recompiler.initialize(), "stub synthesis config should initialize");
+                t.IsTrue(recompiler.recompile(), "stub synthesis config should recompile");
+                recompiler.generateOutput();
+
+                const std::filesystem::path registrationPath = outputPath / "register_functions.cpp";
+                std::ifstream registrationFile(registrationPath);
+                const std::string registration{
+                    std::istreambuf_iterator<char>(registrationFile),
+                    std::istreambuf_iterator<char>()};
+                t.IsTrue(registration.find("// 0x100010") != std::string::npos,
+                         "the undiscovered stub address should be registered for guest dispatch");
+                t.IsTrue(recompiler.reportCounters().functionsStubbed >= 1u,
+                         "the synthesized entry should be emitted as a stub");
+            }
+
+            std::error_code removeError;
+            std::filesystem::remove_all(tempRoot, removeError);
+        });
+
         tc.Run("standalone entry_ blocks register resume points for their JAL return addresses", [](TestCase &t) {
             const std::string uniqueSuffix =
                 std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
@@ -1504,6 +1771,46 @@ void register_ps2_recompiler_tests()
                     std::istreambuf_iterator<char>()};
                 t.IsTrue(registration.find("// 0x100008") != std::string::npos,
                          "JAL return address inside a standalone entry_ block should be registered as a resume point");
+            }
+
+            std::error_code removeError;
+            std::filesystem::remove_all(tempRoot, removeError);
+        });
+
+        tc.Run("a jump in a function's last word executes its delay slot even when the next function starts there", [](TestCase &t) {
+            const std::string uniqueSuffix =
+                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+            const std::filesystem::path tempRoot =
+                std::filesystem::temp_directory_path() / ("ps2recomp-delay-slot-boundary-" + uniqueSuffix);
+            const std::filesystem::path elfPath = tempRoot / "delay-slot.elf";
+            const std::filesystem::path configPath = tempRoot / "delay-slot.toml";
+            const std::filesystem::path outputPath = tempRoot / "output";
+            std::filesystem::create_directories(tempRoot);
+
+            const bool elfWritten = writeMinimalMipsElfWithDelaySlotOnNextFunction(elfPath);
+            const bool configWritten = writeRecompilerTestConfig(configPath, elfPath, outputPath, {});
+            t.IsTrue(elfWritten && configWritten, "delay slot boundary inputs should be generated");
+
+            if (elfWritten && configWritten)
+            {
+                PS2Recompiler recompiler(configPath.string());
+                t.IsTrue(recompiler.initialize(), "delay slot boundary config should initialize");
+                t.IsTrue(recompiler.recompile(), "delay slot boundary ELF should recompile");
+                recompiler.generateOutput();
+
+                std::string wrapperSource;
+                for (const auto &entry : std::filesystem::directory_iterator(outputPath))
+                {
+                    if (entry.path().filename().string().rfind("wrapper", 0) != 0)
+                        continue;
+                    std::ifstream file(entry.path());
+                    wrapperSource.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+                }
+                t.IsTrue(!wrapperSource.empty(), "wrapper should be emitted to its own file");
+                // Dropping the delay slot left $sp 0x10 low after the tail jump, so the caller reloaded $ra from
+                // the wrong stack slot (Mana Khemia froze in the synthesis menu that way).
+                t.IsTrue(wrapperSource.find("ADD32(GPR_U32(ctx, 29), 16)") != std::string::npos,
+                         "the J at the end of wrapper should run its delay slot (addiu $sp, $sp, 0x10)");
             }
 
             std::error_code removeError;
@@ -1719,6 +2026,79 @@ void register_ps2_recompiler_tests()
                       "a data pointer must not split a function at a control-transfer delay slot");
             t.IsFalse(hasStart(0x00100300u),
                       "an isolated data pointer or non-callback code materialization must not become a function");
+            t.IsTrue(hasStart(0x00100600u),
+                     "a strided record table should discover its short leaf handler");
+            t.IsTrue(hasStart(0x00100620u),
+                     "a strided record table should discover a handler that returns beyond the probe window");
+            t.IsTrue(hasStart(0x00100648u),
+                     "a strided record table should discover its longest leaf handler");
+
+            std::error_code removeError;
+            std::filesystem::remove(elfPath, removeError);
+        });
+
+        tc.Run("elf parser keeps switch jump table labels inside their function", [](TestCase &t) {
+            const auto uniqueSuffix = std::to_string(
+                static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count()));
+            const std::filesystem::path elfPath =
+                std::filesystem::temp_directory_path() / ("ps2recomp-switch-table-" + uniqueSuffix + ".elf");
+
+            const bool writeOk = writeMinimalMipsElfWithSwitchJumpTables(elfPath);
+            t.IsTrue(writeOk, "temporary stripped ELF should be generated");
+            if (!writeOk)
+            {
+                return;
+            }
+
+            ElfParser parser(elfPath.string());
+            const bool parseOk = parser.parse();
+            t.IsTrue(parseOk, "generated ELF should parse");
+            if (parseOk)
+            {
+                const auto functions = parser.extractFunctions();
+                auto findStart = [&functions](uint32_t start)
+                {
+                    return std::find_if(functions.begin(), functions.end(),
+                                        [start](const Function &function)
+                                        { return function.start == start; });
+                };
+                auto containsAll = [](const Function &function, std::initializer_list<uint32_t> targets)
+                {
+                    return std::all_of(targets.begin(), targets.end(), [&function](uint32_t target)
+                                       { return target >= function.start && target < function.end; });
+                };
+
+                const auto addiuSwitch = findStart(0x00100020u);
+                t.IsTrue(addiuSwitch != functions.end(), "the lui/addiu switch function should be discovered");
+                if (addiuSwitch != functions.end())
+                {
+                    t.IsTrue(containsAll(*addiuSwitch, {0x00100044u, 0x00100048u, 0x00100050u, 0x00100058u}),
+                             "every case label of the lui/addiu switch should stay inside its function");
+                }
+                for (uint32_t label : {0x00100044u, 0x00100048u, 0x00100050u, 0x00100058u})
+                {
+                    t.IsTrue(findStart(label) == functions.end(),
+                             "a lui/addiu switch case label must not become a function start");
+                }
+
+                const auto foldedSwitch = findStart(0x00100080u);
+                t.IsTrue(foldedSwitch != functions.end(), "the folded-offset switch function should be discovered");
+                if (foldedSwitch != functions.end())
+                {
+                    t.IsTrue(containsAll(*foldedSwitch, {0x00100098u, 0x001000A0u}),
+                             "every case label of the folded-offset switch should stay inside its function");
+                }
+                for (uint32_t label : {0x00100098u, 0x001000A0u})
+                {
+                    t.IsTrue(findStart(label) == functions.end(),
+                             "a folded-offset switch case label must not become a function start");
+                }
+
+                t.IsTrue(findStart(0x001000C0u) != functions.end(),
+                         "a callback table right after a switch table should still discover its first entry");
+                t.IsTrue(findStart(0x001000E0u) != functions.end(),
+                         "a callback table right after a switch table should still discover its second entry");
+            }
 
             std::error_code removeError;
             std::filesystem::remove(elfPath, removeError);

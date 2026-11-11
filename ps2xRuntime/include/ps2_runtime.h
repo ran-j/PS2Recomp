@@ -293,6 +293,7 @@ public:
     [[nodiscard]] ps2x::iop::ModuleLoadResult loadIopModule(std::string_view path, const void *arguments = nullptr, uint32_t argumentSize = 0);
     [[nodiscard]] ps2x::iop::ModuleLoadResult loadIopModuleBuffer(uint32_t guestAddress, const void *arguments = nullptr, uint32_t argumentSize = 0);
     [[nodiscard]] bool stopIopModule(int32_t moduleId, int32_t *result = nullptr);
+    [[nodiscard]] int32_t findIopModuleByAddress(uint32_t iopAddress) const noexcept;
     [[nodiscard]] ps2x::iop::DebugSnapshot iopDebugSnapshot() const;
     uint32_t allocateIopMemory(uint32_t size, uint32_t alignment = 16u);
     bool freeIopMemory(uint32_t address);
@@ -384,6 +385,8 @@ public:
     uint32_t guestHeapEnd() const;
     uint32_t guestHeapLimit() const;
     uint32_t reserveAsyncCallbackStack(uint32_t size, uint32_t alignment = 16u);
+    // Keeps async callback stacks out of [base, end), e.g. a main-thread stack placed at the top of RAM.
+    void excludeAsyncCallbackStackRange(uint32_t base, uint32_t end);
 
     void drainCompletedDmacHandlers(uint8_t *rdram);
 
@@ -517,7 +520,7 @@ private:
     uint32_t m_asyncCallbackStackTop = PS2_RAM_SIZE;
 
     std::atomic<uint32_t> m_missingFunctionPolicy{static_cast<uint32_t>(MissingFunctionPolicy::ContinueToTarget)};
-    std::atomic<bool> m_missingFunctionReported{false};
+    std::atomic<uint32_t> m_missingFunctionReports{0};
     std::atomic<bool> m_stopRequested{false};
     DebugUiCallback m_debugUiInitCallback = nullptr;
     DebugUiCallback m_debugUiDrawCallback = nullptr;

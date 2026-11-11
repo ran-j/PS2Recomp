@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstring>
+#include <iostream>
 #include <limits>
 #include <stdexcept>
 
@@ -112,6 +113,7 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     m_insideInterrupt = false;
     m_pendingEeTimerInterrupts = 0u;
     m_eeCycle = 0u;
+    m_iopPendingEeCycles = 0u;
     m_sliceEndCycle = kDefaultTimeSliceCycles;
     m_stopRequested.store(false, std::memory_order_release);
     m_checkpointPending.store(false, std::memory_order_release);
@@ -246,6 +248,11 @@ void EeScheduler::run()
                 }
                 continue;
             }
+            // Returning from the entry point is a normal exit, but a null call or corrupt $ra lands here too.
+            if (running->id > 0)
+                std::cerr << "[EeScheduler] thread " << running->id << " reached pc=0 from branch_pc=0x" << std::hex
+                      << context.branch_pc << " ra=0x" << getRegU32(&context, 31) << std::dec
+                      << "; treating as thread exit" << std::endl;
             makeDormant(*running);
             m_currentThreadId = 0;
             copyMainContextToRuntime();
@@ -356,7 +363,11 @@ void EeScheduler::postEvent(EeEvent event)
 
 bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
 {
-    accountCycles(cycles);
+    advanceGuestCycles(cycles);
+    if (m_iopPendingEeCycles >= kIopBatchEeCycles)
+    {
+        flushIopCycles();
+    }
 
     if (m_checkpointPending.load(std::memory_order_acquire) ||
         m_stopRequested.load(std::memory_order_acquire))
@@ -390,14 +401,31 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
 
 void EeScheduler::accountCycles(uint32_t cycles) noexcept
 {
+    advanceGuestCycles(cycles);
+    flushIopCycles();
+}
+
+void EeScheduler::advanceGuestCycles(uint32_t cycles) noexcept
+{
     const uint64_t elapsed = std::max<uint64_t>(1u, cycles);
     m_eeCycle += elapsed;
     m_pendingEeTimerInterrupts |= m_runtime.memory().advanceEeTimers(elapsed);
-    m_runtime.advanceIopEeCycles(elapsed);
+    m_iopPendingEeCycles += elapsed;
     if (m_pendingEeTimerInterrupts != 0u)
     {
         m_checkpointPending.store(true, std::memory_order_release);
     }
+}
+
+void EeScheduler::flushIopCycles() noexcept
+{
+    if (m_iopPendingEeCycles == 0u)
+    {
+        return;
+    }
+    const uint64_t pending = m_iopPendingEeCycles;
+    m_iopPendingEeCycles = 0u;
+    m_runtime.advanceIopEeCycles(pending);
 }
 
 bool EeScheduler::isExecutingGuest() const noexcept
@@ -1847,11 +1875,17 @@ void EeScheduler::processDueDeadlines()
         {
             if (scheduled.event.type == EeEventType::VBlankStart)
             {
+                // A vblank that fired more than a period late (the GS or EE fell behind real
+                // time) is re-anchored to now. Chaining from the missed deadline would leave a
+                // backlog of past deadlines that fire back-to-back once the load drops, running
+                // the game faster than real time until the debt is repaid.
+                const auto now = std::chrono::steady_clock::now();
+                const auto hostBase = (now - scheduled.hostDeadline > kVBlankPeriod) ? now : scheduled.hostDeadline;
                 scheduleEvent(scheduled.deadlineCycle + kVBlankDurationCycles,
-                              scheduled.hostDeadline + kVBlankDuration,
+                              hostBase + kVBlankDuration,
                               EeEvent{EeEventType::VBlankEnd, 0, m_vsyncTick + 1u});
                 scheduleEvent(scheduled.deadlineCycle + kVBlankPeriodCycles,
-                              scheduled.hostDeadline + kVBlankPeriod,
+                              hostBase + kVBlankPeriod,
                               EeEvent{EeEventType::VBlankStart, 0, 0});
             }
             processEvent(scheduled.event);

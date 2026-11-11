@@ -597,6 +597,14 @@ namespace ps2_stubs
         setReturnS32(ctx, 0);
     }
 
+    void sceSifSearchModuleByAddress(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        // The guest libkernel version asks LOADFILE over RPC, a BIOS module no BIOS-free IOP registers.
+        constexpr int32_t kUnknownModule = -202; // KE_UNKNOWN_MODULE, as loadcore reports a miss
+        const int32_t moduleId = runtime ? runtime->findIopModuleByAddress(getRegU32(ctx, 4)) : -1;
+        setReturnS32(ctx, moduleId > 0 ? moduleId : kUnknownModule);
+    }
+
     void sceSifSetCmdBuffer(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         const uint32_t newBuffer = getRegU32(ctx, 4);

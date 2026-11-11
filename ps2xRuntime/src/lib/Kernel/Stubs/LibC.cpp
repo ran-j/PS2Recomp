@@ -45,6 +45,37 @@ namespace ps2_stubs
             return (offset < PS2_RAM_SIZE) ? (PS2_RAM_SIZE - offset) : 0u;
         }
 
+        // Guest newlib snprintf/vsprintf format through vfprintf into a stack FILE flagged __SSTR.
+        // Mirror __sprint: copy at most _w bytes to _p and advance both; the caller NUL-terminates.
+        bool writeGuestStringFile(uint8_t *rdram, PS2Runtime *runtime, uint32_t file, const std::string &text)
+        {
+            constexpr uint32_t kNewlibSstr = 0x0200u;
+            constexpr uint32_t kOffsetP = 0x0u;
+            constexpr uint32_t kOffsetW = 0x8u;
+            constexpr uint32_t kOffsetFlags = 0xCu;
+            uint32_t flagsWord = 0u;
+            uint32_t cursor = 0u;
+            uint32_t room = 0u;
+            if (file == 0u ||
+                !tryReadWordFromGuest(rdram, runtime, file + kOffsetFlags, flagsWord) ||
+                (flagsWord & kNewlibSstr) == 0u ||
+                !tryReadWordFromGuest(rdram, runtime, file + kOffsetP, cursor) ||
+                !tryReadWordFromGuest(rdram, runtime, file + kOffsetW, room))
+            {
+                return false;
+            }
+            const uint32_t count = static_cast<uint32_t>(
+                std::min<size_t>(text.size(), static_cast<int32_t>(room) > 0 ? room : 0u));
+            if (count != 0u &&
+                !writeGuestBytes(rdram, runtime, cursor, reinterpret_cast<const uint8_t *>(text.data()), count))
+            {
+                return false;
+            }
+            const uint32_t nextCursor = cursor + count;
+            const uint32_t nextRoom = room - count;
+            return writeGuestBytes(rdram, runtime, file + kOffsetP, reinterpret_cast<const uint8_t *>(&nextCursor), 4u) &&
+                   writeGuestBytes(rdram, runtime, file + kOffsetW, reinterpret_cast<const uint8_t *>(&nextRoom), 4u);
+        }
     }
 
     void malloc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1080,14 +1111,20 @@ namespace ps2_stubs
         setReturnU32(ctx, 0u);
     }
 
+    // newlib's rand(): a 64-bit LCG seeded with 1 that returns bits 32..62, so RAND_MAX is 0x7FFFFFFF.
+    // Games scale by that range (Mana Khemia takes rand() >> 8 before every modulo), so a 15-bit host
+    // rand() collapsed their results to 0..127.
+    static uint64_t g_newlibRandNext = 1u;
+
     void rand(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        setReturnS32(ctx, std::rand() & 0x7FFF);
+        g_newlibRandNext = (g_newlibRandNext * 6364136223846793005ull) + 1u;
+        setReturnS32(ctx, static_cast<int32_t>((g_newlibRandNext >> 32) & 0x7FFFFFFFu));
     }
 
     void srand(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        std::srand(getRegU32(ctx, 4));
+        g_newlibRandNext = getRegU32(ctx, 4);
         setReturnS32(ctx, 0);
     }
 
@@ -1127,7 +1164,13 @@ namespace ps2_stubs
             std::string rendered = formatPs2StringWithVaList(rdram, runtime, formatOwned.c_str(), va_list_addr);
             ret = std::fprintf(fp, "%s", rendered.c_str());
         }
-        else
+        else if (format_addr != 0)
+        {
+            std::string rendered = formatPs2StringWithVaList(rdram, runtime, formatOwned.c_str(), va_list_addr);
+            if (writeGuestStringFile(rdram, runtime, file_handle, rendered))
+                ret = static_cast<int>(rendered.size());
+        }
+        if (ret < 0)
         {
             std::cerr << "vfprintf error: Invalid file handle or format address."
                       << " Handle: 0x" << std::hex << file_handle << " (file valid: " << (fp != nullptr) << ")"

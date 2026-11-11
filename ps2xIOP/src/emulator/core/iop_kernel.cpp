@@ -32,6 +32,7 @@ namespace ps2x::iop::detail
         m_nextSemaphoreId = 1;
         m_nextEventFlagId = 1;
         m_currentThread = nullptr;
+        m_maybeDeadThreads = false;
     }
 
     bool IopKernel::dispatchThreadImport(uint16_t ordinal, IopCpuState &cpu, uint64_t currentCycle)
@@ -107,6 +108,7 @@ namespace ps2x::iop::detail
             if (m_currentThread != nullptr)
             {
                 m_currentThread->state = ordinal == 9 ? IopThreadState::Dead : IopThreadState::Dormant;
+                m_maybeDeadThreads = m_maybeDeadThreads || ordinal == 9;
                 cpu.stopped = true;
                 cpu.yielded = true;
             }
@@ -471,6 +473,38 @@ namespace ps2x::iop::detail
         }
     }
 
+    bool IopKernel::eventFlagReady(int id, uint32_t bits, uint32_t mode) const
+    {
+        const auto event = m_eventFlags.find(id);
+        return event == m_eventFlags.end() || bits == 0u || eventSatisfied(event->second, bits, mode);
+    }
+
+    bool IopKernel::hasReadyAtOrAbove(int priority) const noexcept
+    {
+        for (const auto &[id, thread] : m_threads)
+        {
+            if (thread.state == IopThreadState::Ready && static_cast<int>(thread.priority) <= priority)
+                return true;
+        }
+        return false;
+    }
+
+    bool IopKernel::hasCriticalSectionInProgress() const noexcept
+    {
+        for (const auto &[id, thread] : m_threads)
+        {
+            if (thread.state == IopThreadState::Ready && thread.sliceEndedWithInterruptsOff)
+                return true;
+        }
+        return false;
+    }
+
+    bool IopKernel::semaphoreReady(int id) const
+    {
+        const auto semaphore = m_semaphores.find(id);
+        return semaphore == m_semaphores.end() || semaphore->second.current > 0;
+    }
+
     bool IopKernel::eventSatisfied(const EventFlag &event, uint32_t bits, uint32_t mode)
     {
         if (bits == 0u)
@@ -671,19 +705,25 @@ namespace ps2x::iop::detail
 
     IopThread *IopKernel::beginNextReady(uint64_t currentCycle)
     {
+        IopThread *next = nullptr;
+        bool resumeCriticalSection = false;
         for (auto &[id, thread] : m_threads)
         {
             if (thread.state == IopThreadState::Delay && thread.wakeCycle <= currentCycle)
                 thread.state = IopThreadState::Ready;
-        }
-
-        IopThread *next = nullptr;
-        for (auto &[id, thread] : m_threads)
-        {
-            if (thread.state != IopThreadState::Ready)
+            if (thread.state != IopThreadState::Ready || resumeCriticalSection)
                 continue;
+            if (thread.sliceEndedWithInterruptsOff)
+            {
+                next = &thread;
+                resumeCriticalSection = true;
+                continue;
+            }
+            // Among equal priorities the interrupted thread goes first; one that merely became ready
+            // (e.g. its DelayThread expired) must not cut into it.
             if (next == nullptr || thread.priority < next->priority ||
-                (thread.priority == next->priority && thread.id < next->id))
+                (thread.priority == next->priority &&
+                 (thread.sliceEnded != next->sliceEnded ? thread.sliceEnded : thread.id < next->id)))
                 next = &thread;
         }
         if (next == nullptr)
@@ -709,16 +749,26 @@ namespace ps2x::iop::detail
 
     void IopKernel::endTimeslice(IopThread &thread, uint32_t returnSentinel)
     {
+        thread.sliceEnded = false;
+        thread.sliceEndedWithInterruptsOff = false;
         if (thread.cpu.pc == returnSentinel || thread.cpu.stopped)
             thread.state = IopThreadState::Dormant;
         else if (thread.state == IopThreadState::Running)
+        {
             thread.state = IopThreadState::Ready;
+            // A yield (e.g. RotateThreadReadyQueue) gives way; running out of emulator budget does not.
+            thread.sliceEnded = !thread.cpu.yielded;
+            thread.sliceEndedWithInterruptsOff = thread.sliceEnded && m_memory.interruptControl() == 0u;
+        }
         m_currentThread = nullptr;
         cleanupDeadThreads();
     }
 
     void IopKernel::cleanupDeadThreads()
     {
+        if (!m_maybeDeadThreads)
+            return;
+        m_maybeDeadThreads = false;
         for (auto thread = m_threads.begin(); thread != m_threads.end();)
         {
             if (thread->second.state != IopThreadState::Dead)
@@ -738,7 +788,10 @@ namespace ps2x::iop::detail
         {
             const uint32_t pc = IopMemory::physicalAddress(thread.cpu.pc);
             if (pc >= base && pc < base + size)
+            {
                 thread.state = IopThreadState::Dead;
+                m_maybeDeadThreads = true;
+            }
         }
     }
 }

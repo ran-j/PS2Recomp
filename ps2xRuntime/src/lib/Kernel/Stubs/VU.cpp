@@ -168,21 +168,28 @@ namespace ps2_stubs
             out[3] = fullFtoi4 ? static_cast<int32_t>(t[3] * 16.0f) : static_cast<int32_t>(t[3]);
         }
 
-        // Guard-band proxy for the COP2 sticky clip flags: nonzero => the
-        // vertex is offscreen. Not the hardware per-plane flag layout.
-        constexpr float kScreenClipGuard = 4096.0f;
+        // libvu0's clip tests VSUB the bounds from the vertex and return the VU0 status flags masked to the
+        // sticky sign (0x80) and zero (0x40) bits, so a vertex counts as inside only when every difference
+        // is strictly positive.
+        constexpr uint32_t kVuStickySign = 0x80u;
+        constexpr uint32_t kVuStickyZero = 0x40u;
+        uint32_t vuStickyFlags(float difference)
+        {
+            uint32_t flags = 0u;
+            if (std::signbit(difference))
+                flags |= kVuStickySign;
+            if (difference == 0.0f)
+                flags |= kVuStickyZero;
+            return flags;
+        }
+
+        // sceVu0ClipScreen: x and y must lie in (0, 4096) and w must be positive.
+        constexpr float kScreenClipLimit = 4096.0f;
         int32_t screenClipCode(const float (&v)[4])
         {
-            int32_t code = 0;
-            if (v[0] > kScreenClipGuard)
-                code |= 0x1;
-            if (v[0] < -kScreenClipGuard)
-                code |= 0x2;
-            if (v[1] > kScreenClipGuard)
-                code |= 0x4;
-            if (v[1] < -kScreenClipGuard)
-                code |= 0x8;
-            return code;
+            const uint32_t flags = vuStickyFlags(v[0]) | vuStickyFlags(v[1]) | vuStickyFlags(v[3]) |
+                                   vuStickyFlags(kScreenClipLimit - v[0]) | vuStickyFlags(kScreenClipLimit - v[1]);
+            return static_cast<int32_t>(flags);
         }
     }
 
@@ -245,12 +252,14 @@ namespace ps2_stubs
                 o[2] = (l[0] * r[1]) - (l[1] * r[0]);
                 o[3] = 0.0f;
             };
+            // Same as sceVu0Normalize: xyz length, w cleared.
             auto normalize = [](const float (&s)[4], float (&o)[4])
             {
-                const float len = std::sqrt((s[0] * s[0]) + (s[1] * s[1]) + (s[2] * s[2]) + (s[3] * s[3]));
+                const float len = std::sqrt((s[0] * s[0]) + (s[1] * s[1]) + (s[2] * s[2]));
                 const float inv = (len > 1.0e-6f) ? (1.0f / len) : 0.0f;
-                for (int i = 0; i < 4; ++i)
+                for (int i = 0; i < 3; ++i)
                     o[i] = s[i] * inv;
+                o[3] = 0.0f;
             };
             float rawCross[4]{}, row0[4]{}, row1[4]{}, row2[4]{};
             cross(up, fwd, rawCross);
@@ -319,9 +328,11 @@ namespace ps2_stubs
                 const float tx = (m[0] * v[0]) + (m[4] * v[1]) + (m[8] * v[2]) + (m[12] * v[3]);
                 const float ty = (m[1] * v[0]) + (m[5] * v[1]) + (m[9] * v[2]) + (m[13] * v[3]);
                 const float tw = (m[3] * v[0]) + (m[7] * v[1]) + (m[11] * v[2]) + (m[15] * v[3]);
-                const bool outsideX = (tx < lo[0] * tw) || (tx > hi[0] * tw);
-                const bool outsideY = (ty < lo[1] * tw) || (ty > hi[1] * tw);
-                if (!outsideX && !outsideY)
+                // x/y bounds scale with w; w itself is checked against the raw lo.w/hi.w (near/far).
+                const uint32_t flags = vuStickyFlags(tx - (lo[0] * tw)) | vuStickyFlags(ty - (lo[1] * tw)) |
+                                       vuStickyFlags(tw - lo[3]) | vuStickyFlags((hi[0] * tw) - tx) |
+                                       vuStickyFlags((hi[1] * tw) - ty) | vuStickyFlags(hi[3] - tw);
+                if (flags == 0u)
                 {
                     result = 0;
                     break;
@@ -553,7 +564,8 @@ namespace ps2_stubs
         float dot = 0.0f;
         if (readVuVec4f(rdram, lhsAddr, lhs) && readVuVec4f(rdram, rhsAddr, rhs))
         {
-            dot = (lhs[0] * rhs[0]) + (lhs[1] * rhs[1]) + (lhs[2] * rhs[2]) + (lhs[3] * rhs[3]);
+            // libvu0 multiplies .xyz only, so w never contributes.
+            dot = (lhs[0] * rhs[0]) + (lhs[1] * rhs[1]) + (lhs[2] * rhs[2]);
         }
 
         if (ctx)
@@ -699,10 +711,10 @@ namespace ps2_stubs
         float m0[16]{}, m1[16]{}, out[16]{};
         if (readVuMatrix4f(rdram, m0Addr, m0) && readVuMatrix4f(rdram, m1Addr, m1))
         {
-            // out = m0 * m1 (first source . second source), matching the
-            // file's mulVuMatrix(lhs,rhs)=lhs.rhs convention and the RotMatrix
-            // / ViewScreenMatrix siblings (first operand on the left).
-            mulVuMatrix(m0, m1, out);
+            // libvu0 loads the first source into vf4-vf7 and pushes each row of the second
+            // through it (vmulax/vmadday/vmaddaz/vmaddw), so the second source is applied
+            // first: ApplyMatrix(out, v) == ApplyMatrix(m0, ApplyMatrix(m1, v)).
+            mulVuMatrix(m1, m0, out);
             (void)writeVuMatrix4f(rdram, dstAddr, out);
         }
         setReturnS32(ctx, 0);
@@ -732,11 +744,12 @@ namespace ps2_stubs
         float src[4]{}, out[4]{};
         if (readVuVec4f(rdram, srcAddr, src))
         {
-            const float len = std::sqrt((src[0] * src[0]) + (src[1] * src[1]) + (src[2] * src[2]) + (src[3] * src[3]));
+            // libvu0 takes the length of .xyz, scales .xyz only and clears w.
+            const float len = std::sqrt((src[0] * src[0]) + (src[1] * src[1]) + (src[2] * src[2]));
             if (len > 1.0e-6f)
             {
                 const float invLen = 1.0f / len;
-                for (int i = 0; i < 4; ++i)
+                for (int i = 0; i < 3; ++i)
                 {
                     out[i] = src[i] * invLen;
                 }
@@ -757,12 +770,15 @@ namespace ps2_stubs
         float l0[4]{}, l1[4]{}, l2[4]{};
         if (readVuVec4f(rdram, l0Addr, l0) && readVuVec4f(rdram, l1Addr, l1) && readVuVec4f(rdram, l2Addr, l2))
         {
+            // libvu0 runs ScaleVector(-1) then Normalize, which measures and scales xyz only and clears w,
+            // so a light's w (often 1.0) neither shortens the direction nor leaks into the matrix.
             auto negNormalize = [](const float (&s)[4], float (&o)[4])
             {
-                const float len = std::sqrt((s[0] * s[0]) + (s[1] * s[1]) + (s[2] * s[2]) + (s[3] * s[3]));
+                const float len = std::sqrt((s[0] * s[0]) + (s[1] * s[1]) + (s[2] * s[2]));
                 const float inv = (len > 1.0e-6f) ? (1.0f / len) : 0.0f;
-                for (int i = 0; i < 4; ++i)
+                for (int i = 0; i < 3; ++i)
                     o[i] = -s[i] * inv;
+                o[3] = 0.0f;
             };
             float r0[4]{}, r1[4]{}, r2[4]{};
             negNormalize(l0, r0);
@@ -888,7 +904,8 @@ namespace ps2_stubs
         const uint32_t dstAddr = getRegU32(ctx, 4);
         const uint32_t matAddr = getRegU32(ctx, 5);
         const uint32_t vAddr = getRegU32(ctx, 6);
-        const bool fullFtoi4 = (getRegU32(ctx, 7) != 0);
+        // libvu0 applies VFTOI0 to z/w only when mode is nonzero; mode 0 keeps all four lanes in 12.4.
+        const bool fullFtoi4 = (getRegU32(ctx, 7) == 0);
         float m[16]{}, v[4]{};
         if (readVuMatrix4f(rdram, matAddr, m) && readVuVec4f(rdram, vAddr, v))
         {
@@ -905,7 +922,7 @@ namespace ps2_stubs
         const uint32_t matAddr = getRegU32(ctx, 5);
         uint32_t vAddr = getRegU32(ctx, 6);
         const int32_t count = static_cast<int32_t>(getRegU32(ctx, 7));
-        const bool fullFtoi4 = (getRegU32(ctx, 8) != 0);
+        const bool fullFtoi4 = (getRegU32(ctx, 8) == 0);
         float m[16]{};
         if (readVuMatrix4f(rdram, matAddr, m))
         {
@@ -930,16 +947,8 @@ namespace ps2_stubs
         const uint32_t dstAddr = getRegU32(ctx, 4);
         const uint32_t srcAddr = getRegU32(ctx, 5);
         float src[4]{}, out[4]{};
-        float scale = ctx ? ctx->f[12] : 0.0f;
-        if (scale == 0.0f)
-        {
-            uint32_t raw = getRegU32(ctx, 6);
-            std::memcpy(&scale, &raw, sizeof(scale));
-            if (scale == 0.0f)
-            {
-                scale = static_cast<float>(getRegU32(ctx, 6));
-            }
-        }
+        // libvu0 takes the scale from f12 only; a2 is not an argument, so a 0.0f scale must yield zero.
+        const float scale = ctx ? ctx->f[12] : 0.0f;
 
         if (readVuVec4f(rdram, srcAddr, src))
         {

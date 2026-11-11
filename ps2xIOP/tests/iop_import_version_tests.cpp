@@ -46,6 +46,31 @@ namespace
         require(alias && alias->version == 0x0310u, "cached alias lost import version");
     }
 
+    void decodeFollowsRewrittenTable()
+    {
+        IopMemory memory;
+        IopImportRegistry imports(memory);
+        importTable(memory, 0x1000u, 0x0310u);
+        require(imports.decode(0x1014u) && imports.decode(0x1014u)->version == 0x0310u, "first decode failed");
+
+        // A module loaded over the old image without an unload in between must not reuse stale stub data.
+        memory.write16(0x1008u, 0x0420u);
+        const auto bumped = imports.decode(0x1014u);
+        require(bumped && bumped->version == 0x0420u, "decoder kept a stale library version");
+
+        constexpr char other[8] = "othlib";
+        require(memory.writeRam(0x100Cu, other, sizeof(other)), "name rewrite failed");
+        const auto renamed = imports.decode(0x1014u);
+        require(renamed && renamed->library == "othlib", "decoder kept a stale library name");
+
+        memory.write32(0x1018u, 0x24000005u);
+        const auto reordered = imports.decode(0x1014u);
+        require(reordered && reordered->ordinal == 5u, "decoder kept a stale ordinal");
+
+        memory.write32(0x1000u, 0u);
+        require(!imports.decode(0x1014u), "decoder still resolved a stub whose table header is gone");
+    }
+
     void majorIsolation()
     {
         IopMemory memory;
@@ -160,6 +185,7 @@ int main()
 {
     const Test tests[] = {
         {"Import decoder preserves library ABI version", decodeVersion},
+        {"Import decoder notices a rewritten import table", decodeFollowsRewrittenTable},
         {"Different major versions cannot cross-link", majorIsolation},
         {"Newest registered minor wins within the requested major", newestMinor},
         {"Ordinal lookup stays in the selected table", missingOrdinal},

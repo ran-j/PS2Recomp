@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ps2x/iop/iop_host.h"
+#include "ps2_audio_stream.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -60,6 +61,7 @@ public:
                       uint32_t function,
                       ps2x::iop::GuestBuffer send,
                       ps2x::iop::GuestBuffer receive) override;
+    void audioOutput(const int16_t *samples, size_t frames) override;
 
     std::string hostPath(ps2x::iop::HostPathKind kind) const override;
     std::string translateGuestPath(std::string_view path) const override;
@@ -105,4 +107,5 @@ private:
     mutable std::mutex m_hostFileMutex;
     std::unordered_map<uint64_t, HostFile> m_hostFiles;
     uint64_t m_nextHostFileHandle = 1u;
+    Spu2AudioOutput m_audioOutput;
 };
