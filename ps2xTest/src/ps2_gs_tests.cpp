@@ -953,6 +953,36 @@ void register_ps2_gs_tests()
             t.Equals(env.zbuf1.value & 0x1FFull, 70ull, "ZBP should be libgraph's sceGszbufaddr(CT16, 640, 448)");
         });
 
+        tc.Run("sceGsPutDrawEnv sends the NLOOP A+D pairs that follow the GIF tag", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            constexpr uint32_t kTagAddr = 0x4000u;
+            constexpr uint32_t kColor = 0x80123456u;
+            const uint64_t pairs[][2] = {
+                {(1ull << 16) | (static_cast<uint64_t>(GS_PSM_CT32) << 24), GS_REG_FRAME_1},
+                {64ull | (1ull << 32), GS_REG_ZBUF_1},
+                {(7ull << 16) | (7ull << 48), GS_REG_SCISSOR_1},
+                {0ull, GS_REG_XYOFFSET_1},
+                {0x30000ull, GS_REG_TEST_1},
+                {static_cast<uint64_t>(GS_PRIM_SPRITE), GS_REG_PRIM},
+                {kColor, GS_REG_RGBAQ},
+                {0ull, GS_REG_XYZ2},
+                {(8ull << 4) | ((8ull << 4) << 16), GS_REG_XYZ2},
+            };
+            const uint64_t tag[2] = {makeGiftagAplusD(9u), 0xEull};
+            std::memcpy(rdram.data() + kTagAddr, tag, sizeof(tag));
+            std::memcpy(rdram.data() + kTagAddr + 16u, pairs, sizeof(pairs));
+
+            R5900Context ctx{};
+            setRegU32(ctx, 4, kTagAddr);
+            ps2_stubs::sceGsPutDrawEnv(rdram.data(), &ctx, &runtime);
+            t.Equals(getRegU32Test(ctx, 2), 0u, "sceGsPutDrawEnv should return 0");
+            t.Equals(runtime.gs().ReadVram(GS_PSM_CT32, 0u, 1u, 3u, 3u), kColor,
+                     "every pair after the tag, including the closing XYZ2, should reach the GS");
+        });
+
         tc.Run("sceGsSetDefDrawEnv2 truncates FBW where sceGsSetDefDrawEnv rounds it up", [](TestCase &t)
         {
             PS2Runtime runtime;
