@@ -825,6 +825,55 @@ namespace ps2recomp
         }
     }
 
+    // Every instruction that follows an unconditional transfer and its delay slot starts a block no
+    // fallthrough reaches, which is where a routine the function map missed begins (leaf handlers
+    // named only by data tables). Registering those as resume entries lets jalr/jr land on them
+    // through the owning function instead of leaving the thread dormant on a missing target.
+    size_t collectPostTransferEntryTargetsImpl(
+        const std::vector<Function> &functions,
+        const std::unordered_map<uint32_t, std::vector<Instruction>> &decodedFunctions,
+        std::unordered_map<uint32_t, std::vector<uint32_t>> &targetsByOwner)
+    {
+        const auto isUnconditionalTransfer = [](const Instruction &inst)
+        {
+            if (!inst.hasDelaySlot)
+                return false;
+            const bool jumpRegister = inst.opcode == OPCODE_SPECIAL && inst.function == SPECIAL_JR;
+            const bool jumpAbsolute = inst.opcode == OPCODE_J;
+            const bool branchAlways = inst.opcode == OPCODE_BEQ && inst.rs == 0u && inst.rt == 0u;
+            return jumpRegister || jumpAbsolute || branchAlways;
+        };
+
+        size_t addedCount = 0u;
+        for (const auto &function : functions)
+        {
+            if (!function.isRecompiled || function.isStub || function.isSkipped)
+                continue;
+            const auto decodedIt = decodedFunctions.find(function.start);
+            if (decodedIt == decodedFunctions.end())
+                continue;
+            const auto &instructions = decodedIt->second;
+            std::vector<uint32_t> *targets = nullptr;
+            for (size_t i = 0; i + 2 < instructions.size(); ++i)
+            {
+                if (!isUnconditionalTransfer(instructions[i]))
+                    continue;
+                const Instruction &candidate = instructions[i + 2];
+                // Padding between functions is zero words; a routine never starts with one.
+                if (candidate.raw == 0u || candidate.address == function.start)
+                    continue;
+                if (!targets)
+                    targets = &targetsByOwner[function.start];
+                if (std::find(targets->begin(), targets->end(), candidate.address) == targets->end())
+                {
+                    targets->push_back(candidate.address);
+                    ++addedCount;
+                }
+            }
+        }
+        return addedCount;
+    }
+
     PS2Recompiler::PS2Recompiler(const std::string &configPath)
         : m_configManager(configPath)
     {
@@ -2111,6 +2160,15 @@ namespace ps2recomp
             }
         }
 
+        const size_t postTransferTargets =
+            collectPostTransferEntryTargetsImpl(m_functions, m_decodedFunctions, m_resumeEntryTargetsByOwner);
+        if (postTransferTargets > 0u)
+        {
+            std::ostringstream msg;
+            msg << "registered " << postTransferTargets << " block start(s) after unconditional transfers as resume entries";
+            m_reporter.progress(msg.str());
+        }
+
         size_t totalTargets = 0u;
         for (auto it = m_resumeEntryTargetsByOwner.begin(); it != m_resumeEntryTargetsByOwner.end();)
         {
@@ -2463,6 +2521,14 @@ namespace ps2recomp
     size_t PS2Recompiler::ResliceEntryFunctions(std::vector<Function> &functions, std::unordered_map<uint32_t, std::vector<Instruction>> &decodedFunctions)
     {
         return resliceEntryFunctionsImpl(functions, decodedFunctions);
+    }
+
+    size_t PS2Recompiler::CollectPostTransferEntryTargets(
+        const std::vector<Function> &functions,
+        const std::unordered_map<uint32_t, std::vector<Instruction>> &decodedFunctions,
+        std::unordered_map<uint32_t, std::vector<uint32_t>> &targetsByOwner)
+    {
+        return collectPostTransferEntryTargetsImpl(functions, decodedFunctions, targetsByOwner);
     }
 
     size_t PS2Recompiler::CollectInternalEntryTargets(

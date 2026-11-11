@@ -1333,6 +1333,50 @@ void register_ps2_recompiler_tests()
             }
         });
 
+        tc.Run("block starts after unconditional transfers become resume entries of their function", [](TestCase &t) {
+            // A merged leaf after `jr ra; sh` (as the battle handlers were), zero padding after the
+            // next return, and a call whose successor is plain fallthrough.
+            std::vector<Instruction> body;
+            body.push_back(makeJrRa(0x1000u));
+            Instruction store = makeNopLike(0x1004u);
+            store.raw = 0xA58E0034u;
+            body.push_back(store);
+            Instruction leaf = makeNopLike(0x1008u);
+            leaf.raw = 0x8C8F002Cu;
+            body.push_back(leaf);
+            body.push_back(makeJrRa(0x100Cu));
+            body.push_back(makeNopLike(0x1010u));
+            body.push_back(makeNopLike(0x1014u)); // zero padding, raw == 0
+            Instruction call = makeAbsJump(0x1018u, 0x2000u, OPCODE_JAL);
+            call.isCall = true;
+            body.push_back(call);
+            body.push_back(makeNopLike(0x101Cu));
+            Instruction after = makeNopLike(0x1020u);
+            after.raw = 0x24420001u;
+            body.push_back(after);
+            Instruction tail = makeAbsJump(0x1024u, 0x1008u, OPCODE_J);
+            body.push_back(tail);
+            body.push_back(makeNopLike(0x1028u));
+            Instruction last = makeNopLike(0x102Cu);
+            last.raw = 0x24420001u;
+            body.push_back(last);
+
+            std::vector<Function> functions{makeFunction("container", 0x1000u, 0x1030u)};
+            std::unordered_map<uint32_t, std::vector<Instruction>> decoded;
+            decoded.emplace(0x1000u, body);
+            std::unordered_map<uint32_t, std::vector<uint32_t>> targets;
+            const size_t added = PS2Recompiler::CollectPostTransferEntryTargets(functions, decoded, targets);
+
+            const auto &owner = targets[0x1000u];
+            auto has = [&owner](uint32_t address)
+            { return std::find(owner.begin(), owner.end(), address) != owner.end(); };
+            t.Equals(added, static_cast<size_t>(2), "two block starts follow a transfer and its delay slot");
+            t.IsTrue(has(0x1008u), "the instruction after `jr ra` and its delay slot is a resume entry");
+            t.IsTrue(has(0x102Cu), "the instruction after `j` and its delay slot is a resume entry");
+            t.IsFalse(has(0x1014u), "zero padding after a return is not an entry");
+            t.IsFalse(has(0x1020u), "the fallthrough after a call is not an entry");
+        });
+
         tc.Run("discovery ignores synthetic entry wrappers", [](TestCase &t) {
             std::vector<Section> sections = {
                 {".text", 0x1000u, 0x2000u, 0u, true, false, false, true, nullptr}

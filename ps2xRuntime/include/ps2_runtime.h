@@ -520,7 +520,7 @@ private:
     uint32_t m_asyncCallbackStackTop = PS2_RAM_SIZE;
 
     std::atomic<uint32_t> m_missingFunctionPolicy{static_cast<uint32_t>(MissingFunctionPolicy::ContinueToTarget)};
-    std::atomic<bool> m_missingFunctionReported{false};
+    std::atomic<uint32_t> m_missingFunctionReports{0};
     std::atomic<bool> m_stopRequested{false};
     DebugUiCallback m_debugUiInitCallback = nullptr;
     DebugUiCallback m_debugUiDrawCallback = nullptr;

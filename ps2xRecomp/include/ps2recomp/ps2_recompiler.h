@@ -43,6 +43,10 @@ namespace ps2recomp
             std::unordered_map<uint32_t, std::vector<Instruction>> &decodedFunctions,
             const std::vector<Section> &sections);
         static size_t ResliceEntryFunctions(std::vector<Function> &functions, std::unordered_map<uint32_t, std::vector<Instruction>> &decodedFunctions);
+        static size_t CollectPostTransferEntryTargets(
+            const std::vector<Function> &functions,
+            const std::unordered_map<uint32_t, std::vector<Instruction>> &decodedFunctions,
+            std::unordered_map<uint32_t, std::vector<uint32_t>> &targetsByOwner);
         static size_t CollectInternalEntryTargets(
             const std::vector<Function> &functions,
             const std::unordered_map<uint32_t, std::vector<Instruction>> &decodedFunctions,

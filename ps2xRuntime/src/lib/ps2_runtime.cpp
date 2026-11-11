@@ -1261,7 +1261,7 @@ PS2Runtime::MissingFunctionPolicy PS2Runtime::missingFunctionPolicy() const
 
 void PS2Runtime::resetMissingFunctionReportOnce()
 {
-    m_missingFunctionReported.store(false, std::memory_order_release);
+    m_missingFunctionReports.store(0u, std::memory_order_release);
 }
 
 void PS2Runtime::reportMissingFunction(uint8_t *rdram,
@@ -1272,7 +1272,12 @@ void PS2Runtime::reportMissingFunction(uint8_t *rdram,
                                        const char *debugName)
 {
     const MissingFunctionPolicy policy = missingFunctionPolicy();
-    const bool firstReport = !m_missingFunctionReported.exchange(true, std::memory_order_acq_rel);
+    // One line per distinct failure is what a play log needs; a game that keeps hitting missing
+    // targets after the first would otherwise hide every later one, so report the first few.
+    constexpr uint32_t kMaxMissingFunctionReports = 16u;
+    const uint32_t reportIndex = m_missingFunctionReports.fetch_add(1u, std::memory_order_acq_rel);
+    const bool firstReport = reportIndex < kMaxMissingFunctionReports;
+    const bool breakOnce = reportIndex == 0u;
 
     const uint32_t pc = ctx->pc;
     const uint32_t ra = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0));
@@ -1404,7 +1409,7 @@ void PS2Runtime::reportMissingFunction(uint8_t *rdram,
         }
     }
 
-    if (firstReport && policy == MissingFunctionPolicy::BreakOnce)
+    if (breakOnce && policy == MissingFunctionPolicy::BreakOnce)
     {
 #if defined(_MSC_VER)
         __debugbreak();
