@@ -362,6 +362,17 @@ namespace
         return readReferencePSMCT32Pixel(vram, frameBaseToBlock(fbp), fbw, x, y);
     }
 
+    // Sets libgraph's CRT parameters the way the game does, through the HLE sceGsResetGraph.
+    void resetGraphForTest(std::vector<uint8_t> &rdram, PS2Runtime &runtime, uint32_t interlace, uint32_t ffmode)
+    {
+        R5900Context ctx{};
+        setRegU32(ctx, 4, 0u);
+        setRegU32(ctx, 5, interlace);
+        setRegU32(ctx, 6, 2u); // NTSC
+        setRegU32(ctx, 7, ffmode);
+        ps2_stubs::sceGsResetGraph(rdram.data(), &ctx, &runtime);
+    }
+
     void expectGuestHeapReusable(TestCase &t, PS2Runtime &runtime, const char *message)
     {
         const uint32_t expectedBase = runtime.guestHeapBase();
@@ -827,6 +838,56 @@ void register_ps2_gs_tests()
 
             t.Equals(gs.ReadVram(GS_PSM_CT32, 0u, 1u, 3u, 3u), 0x44332211u, "pixels inside the clear rectangle take the clear colour");
             t.Equals(gs.ReadVram(GS_PSM_CT32, 0u, 1u, 12u, 12u), 0xABABABABu, "pixels outside the rectangle are untouched");
+        });
+
+        tc.Run("sceGszbufaddr takes psm, width and height in a0-a2 and counts one buffer in field mode", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            auto zbufaddr = [&](uint32_t psm, uint32_t w, uint32_t h)
+            {
+                R5900Context ctx{};
+                setRegU32(ctx, 4, psm);
+                setRegU32(ctx, 5, w);
+                setRegU32(ctx, 6, h);
+                setRegU32(ctx, 7, 0x1234u); // not an argument
+                ps2_stubs::sceGszbufaddr(rdram.data(), &ctx, &runtime);
+                return getRegU32Test(ctx, 2);
+            };
+
+            resetGraphForTest(rdram, runtime, 0u, 0u);
+            t.Equals(zbufaddr(GS_PSM_CT32, 640u, 448u), 280u, "progressive: Z follows two 140-page CT32 buffers");
+            t.Equals(zbufaddr(GS_PSM_CT16, 640u, 448u), 140u, "CT16 uses 64-line pages: two 70-page buffers");
+
+            resetGraphForTest(rdram, runtime, 1u, 0u);
+            t.Equals(zbufaddr(GS_PSM_CT32, 640u, 448u), 140u, "interlaced field mode counts a single buffer");
+
+            resetGraphForTest(rdram, runtime, 1u, 1u);
+            t.Equals(zbufaddr(GS_PSM_CT32, 640u, 448u), 280u, "interlaced frame mode counts both buffers");
+        });
+
+        tc.Run("sceGsSetDefDrawEnv places ZBUF with the draw psm, not the env pointer", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            resetGraphForTest(rdram, runtime, 1u, 0u);
+
+            // Mana Khemia's 2D layer: SetDefDrawEnv(env, PSMCT16, 640, 448, ztest, zpsm 0).
+            constexpr uint32_t kEnvAddr = 0x4000u;
+            R5900Context ctx{};
+            setRegU32(ctx, 4, kEnvAddr);
+            setRegU32(ctx, 5, GS_PSM_CT16);
+            setRegU32(ctx, 6, 640u);
+            setRegU32(ctx, 7, 448u);
+            setRegU32(ctx, 8, 1u);
+            setRegU32(ctx, 9, 0u);
+            ps2_stubs::sceGsSetDefDrawEnv(rdram.data(), &ctx, &runtime);
+
+            GsDrawEnv1Mem env{};
+            std::memcpy(&env, rdram.data() + kEnvAddr, sizeof(env));
+            t.Equals(env.zbuf1.value & 0x1FFull, 70ull, "ZBP should be libgraph's sceGszbufaddr(CT16, 640, 448)");
         });
 
         tc.Run("XYZ3 culls a triangle strip primitive without desynchronizing the vertex queue", [](TestCase &t)
