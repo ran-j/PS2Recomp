@@ -2681,6 +2681,34 @@ void register_ps2_memory_tests()
                      "preserved TTE should deliver the tag high-half VIFcode");
         });
 
+        tc.Run("sceDmaSend leaves CHCR.TIE alone so an IRQ tag does not end the chain", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kVif1Ch = 0x10009000u;
+            constexpr uint32_t kTag = 0x00028500u;
+
+            PS2Memory &mem = runtime.memory();
+            uint8_t *rdram = mem.getRDRAM();
+            // CNT with its IRQ bit set, then END; each carries an ITOP in the tag's high half (TTE).
+            writeDmaTag(rdram, kTag, makeDmaTag(0u, 1u, 0u, true));
+            const uint32_t firstItop = makeVifCmd(0x04u, 0u, 0x11u);
+            std::memcpy(rdram + kTag + 12u, &firstItop, sizeof(firstItop));
+            writeDmaTag(rdram, kTag + 16u, makeDmaTag(0u, 7u, 0u, false));
+            const uint32_t lastItop = makeVifCmd(0x04u, 0u, 0x66u);
+            std::memcpy(rdram + kTag + 16u + 12u, &lastItop, sizeof(lastItop));
+
+            // libdma keeps the guest's CHCR bits: TTE set, TIE clear.
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x40u), "guest should be able to set CHCR.TTE");
+            R5900Context ctx{};
+            setRegU32(ctx, 4, 1u);
+            setRegU32(ctx, 5, kTag);
+            ps2_stubs::sceDmaSend(rdram, &ctx, &runtime);
+
+            t.Equals(mem.vif1_regs.itops, 0x66u, "with TIE clear the IRQ tag must not stop the chain");
+        });
+
         tc.Run("sceDmaRecvN copies scratchpad data back to RDRAM", [](TestCase &t)
         {
             PS2Runtime runtime;

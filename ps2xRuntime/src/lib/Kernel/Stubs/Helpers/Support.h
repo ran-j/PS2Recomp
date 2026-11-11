@@ -1361,9 +1361,10 @@ namespace
         uint32_t tadr = payloadPhys;
         PS2Memory &mem = runtime->memory();
 
+        // libdma only replaces MOD and sets DIR|STR, keeping the channel's TTE/TIE/ASP bits. Forcing TIE
+        // would end a chain at the first tag whose IRQ bit is set.
         const uint32_t configuredChcr = mem.readIORegister(channelBase + 0x00u);
-        const uint32_t transferTagEnable = configuredChcr & 0x00000040u;
-        uint32_t chcr = 0x00000181u | transferTagEnable; // DIR=1, TIE=1, STR=1 (normal mode).
+        uint32_t chcr = (configuredChcr & ~0x0000000Cu) | 0x00000101u; // normal mode, DIR=1, STR=1
 
         if (preferNormalCount)
         {
@@ -1372,7 +1373,7 @@ namespace
         }
         else
         {
-            chcr = 0x00000185u | transferTagEnable; // MODE=1 chain, DIR=1, TIE=1, STR=1.
+            chcr |= 0x00000004u; // MOD=1 chain
         }
 
         mem.writeIORegister(channelBase + 0x20u, qwc & 0xFFFFu);
@@ -1458,7 +1459,9 @@ namespace
         PS2Memory &mem = runtime->memory();
         mem.writeIORegister(channelBase + 0x20u, normalizeQwcFromArg(getRegU32(ctx, 6)) & 0xFFFFu);
         mem.writeIORegister(channelBase + 0x10u, toDmaPhys(getRegU32(ctx, 5)));
-        mem.writeIORegister(channelBase + 0x00u, 0x00000180u); // DIR=0, TIE=1, STR=1 (normal mode).
+        // libdma: normal mode, DIR=0, STR=1, other CHCR bits kept.
+        const uint32_t configuredChcr = mem.readIORegister(channelBase + 0x00u);
+        mem.writeIORegister(channelBase + 0x00u, (configuredChcr & ~0x0000000Du) | 0x00000100u);
         mem.processPendingTransfers();
 
         {
