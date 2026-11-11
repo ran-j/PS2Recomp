@@ -547,6 +547,7 @@ void register_ps2_gs_tests()
             t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
 
             std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            resetGraphForTest(rdram, runtime, 0u, 0u);
             constexpr uint32_t kEnvAddr = 0x4000u;
             constexpr uint32_t kDispEnvSize = 40u;
             constexpr uint32_t kDBuffSize = 0x330u;
@@ -580,7 +581,10 @@ void register_ps2_gs_tests()
             std::memcpy(&xyoffset10Addr, rdram.data() + kEnvAddr + kXYOffset1AddrOffset, sizeof(xyoffset10Addr));
 
             t.Equals((dispfb0 >> 9) & 0x3Fu, 10ull, "dbuff display env should seed FBW from width");
-            t.Equals((display0 >> 32) & 0x0FFFull, 639ull, "dbuff display env should seed DW from width");
+            t.Equals((display0 >> 32) & 0x0FFFull, 2559ull, "libgraph stretches DW to 4 x 640 VCK");
+            t.Equals((display0 >> 23) & 0xFull, 3ull, "MAGH 3 maps the 2560 VCK back to 640 pixels");
+            t.Equals(display0 & 0xFFFull, 636ull, "NTSC DX");
+            t.Equals((display0 >> 12) & 0x7FFull, 25ull, "progressive NTSC DY");
             t.Equals((display0 >> 44) & 0x07FFull, 447ull, "dbuff display env should seed DH from height");
             t.Equals((frame10 >> 16) & 0x3Full, 10ull, "dbuff draw env should seed FRAME FBW from width");
             t.Equals(frame10Addr, 0x4Cull, "dbuff draw env should seed FRAME_1 register id");
@@ -602,8 +606,37 @@ void register_ps2_gs_tests()
 
             t.Equals(runtime.memory().gs().dispfb1 & 0x1FFull, 151ull,
                      "sceGsSwapDBuffDc should program GS to the selected display page");
-            t.Equals((runtime.memory().gs().display1 >> 32) & 0x0FFFull, 639ull,
+            t.Equals((runtime.memory().gs().display1 >> 32) & 0x0FFFull, 2559ull,
                      "sceGsSwapDBuffDc should preserve the display width from the seeded env");
+            resetGraphForTest(rdram, runtime, 1u, 1u);
+        });
+
+        tc.Run("sceGsSetDefDispEnv writes the whole display env like libgraph", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            constexpr uint32_t kEnvAddr = 0x4000u;
+            std::memset(rdram.data() + kEnvAddr, 0xCD, sizeof(GsDispEnvMem));
+
+            // Mana Khemia: ResetGraph(0, 1, NTSC, 0) then SetDefDispEnv(disp, psm, 640, 448, 0, 0).
+            resetGraphForTest(rdram, runtime, 1u, 0u);
+            R5900Context ctx{};
+            setRegU32(ctx, 4, kEnvAddr);
+            setRegU32(ctx, 5, GS_PSM_CT24);
+            setRegU32(ctx, 6, 640u);
+            setRegU32(ctx, 7, 448u);
+            ps2_stubs::sceGsSetDefDispEnv(rdram.data(), &ctx, &runtime);
+
+            GsDispEnvMem env{};
+            std::memcpy(&env, rdram.data() + kEnvAddr, sizeof(env));
+            t.Equals(env.pmode, 0x66ull, "PMODE enables read circuit 2 only");
+            t.Equals(env.smode2, 1ull, "SMODE2: interlaced, field mode");
+            t.Equals(env.dispfb, (static_cast<uint64_t>(GS_PSM_CT24) << 15) | (10ull << 9), "DISPFB: page 0, FBW 10");
+            t.Equals(env.display, 636ull | (50ull << 12) | (3ull << 23) | (2559ull << 32) | (447ull << 44),
+                     "DISPLAY: interlaced NTSC position and 4x horizontal magnification");
+            t.Equals(env.bgcolor, 0ull, "BGCOLOR is black");
+            resetGraphForTest(rdram, runtime, 1u, 1u);
         });
 
         tc.Run("sceGsSetDefDBuffDc keeps the second frame buffer out of the Z buffer", [](TestCase &t)

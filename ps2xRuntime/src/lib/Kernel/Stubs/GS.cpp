@@ -64,6 +64,36 @@ namespace ps2_stubs
             return static_cast<int16_t>(fieldInterlace ? pages : pages * 2);
         }
 
+        // libgraph's sceGsSetDefDispEnv: read-out circuit 2 only (PMODE 0x66), SMODE2 from the CRT mode,
+        // and a DISPLAY positioned for the video mode with MAGH stretching the width to ~2560 VCK. An
+        // unsupported video mode leaves DISPLAY as it was, as libgraph does after printing its error.
+        void libgraphDefDispEnv(GsDispEnvMem &env, uint32_t psm, int32_t w, int32_t h, int32_t dx, int32_t dy)
+        {
+            const bool interlaced = g_gparam.interlace == 1u;
+            env.pmode = 0x66u;
+            env.smode2 = (g_gparam.interlace == 0u) ? 2u : ((g_gparam.ffmode != 0u) ? 3u : 1u);
+            env.dispfb = (static_cast<uint64_t>(psm & 0xFu) << 15) |
+                         (static_cast<uint64_t>(((w + 63) >> 6) & 0x3F) << 9);
+            if ((g_gparam.omode == 2u || g_gparam.omode == 3u) && w > 0)
+            {
+                const bool pal = g_gparam.omode == 3u;
+                const int32_t mag = (w + 2559) / w;
+                const int32_t displayX = (dx * mag) + (pal ? 656 : 636);
+                const int32_t displayY = dy + (pal ? (interlaced ? 72 : 36) : (interlaced ? 50 : 25));
+                const int32_t displayH = (interlaced && g_gparam.ffmode != 0u) ? ((h * 2) - 1) : (h - 1);
+                env.display = makeDisplay(static_cast<uint32_t>(displayX), static_cast<uint32_t>(displayY),
+                                          static_cast<uint32_t>(mag - 1), 0u, static_cast<uint32_t>((mag * w) - 1),
+                                          static_cast<uint32_t>(displayH));
+            }
+            else if (g_gparam.omode == 0x50u)
+            {
+                const int32_t displayX = (((720 - w) / 2) * 2) + (dx * 2) + 232;
+                env.display = makeDisplay(static_cast<uint32_t>(displayX), static_cast<uint32_t>(dy + 35), 1u, 0u,
+                                          static_cast<uint32_t>((w * 2) - 1), static_cast<uint32_t>(h - 1));
+            }
+            env.bgcolor = 0u;
+        }
+
         bool hasSeededGsClearPacket(const GsClearMem &clear)
         {
             return clear.rgbaq.reg == GS_REG_RGBAQ &&
@@ -944,11 +974,6 @@ namespace ps2_stubs
 
         const uint32_t fbw = std::max<uint32_t>(1u, (w + 63u) / 64u);
         const uint32_t fbw2 = (w >> 6) & 0x3Fu; // sceGsSetDefDrawEnv2 truncates
-        const uint64_t pmode = makePmode(1u, 1u, 0u, 0u, 0u, 0x80u);
-        const uint64_t smode2 =
-            (static_cast<uint64_t>(g_gparam.interlace & 0x1u) << 0) |
-            (static_cast<uint64_t>(g_gparam.ffmode & 0x1u) << 1);
-        const uint64_t display = makeDisplay(636u, 32u, 0u, 0u, w - 1u, h - 1u);
 
         const int32_t drawWidth = static_cast<int32_t>(w);
         const int32_t drawHeight = static_cast<int32_t>(h);
@@ -961,17 +986,10 @@ namespace ps2_stubs
         // so SwapDBuffDc(0) shows page 0 while drawing the other. Interlaced field mode shares one buffer.
         const bool fieldInterlace = g_gparam.interlace != 0u && !(g_gparam.interlace == 1u && g_gparam.ffmode == 1u);
         const uint32_t fbp1 = fieldInterlace ? 0u : (static_cast<uint32_t>(static_cast<int32_t>(zbufAddr) >> 1) & 0x1FFu);
-        const uint64_t dispfb0 = makeDispFb(0u, fbw, psm, 0u, 0u);
-        const uint64_t dispfb1 = makeDispFb(fbp1, fbw, psm, 0u, 0u);
-
         GsDBuffDcMem db{};
-        db.disp[0].pmode = pmode;
-        db.disp[0].smode2 = smode2;
-        db.disp[0].dispfb = dispfb0;
-        db.disp[0].display = display;
-        db.disp[0].bgcolor = 0u;
+        libgraphDefDispEnv(db.disp[0], psm, drawWidth, drawHeight, 0, 0);
         db.disp[1] = db.disp[0];
-        db.disp[1].dispfb = dispfb1;
+        db.disp[1].dispfb |= fbp1;
 
         const bool seedClear = clear != 0u;
         const bool dithered = (psm & 2u) != 0u;
@@ -1055,24 +1073,27 @@ namespace ps2_stubs
 
     void sceGsSetDefDispEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        uint32_t envAddr = getRegU32(ctx, 4);
-        uint32_t psm = getRegU32(ctx, 5);
-        uint32_t w = getRegU32(ctx, 6);
-        uint32_t h = getRegU32(ctx, 7);
+        const uint32_t envAddr = getRegU32(ctx, 4);
+        const uint32_t psm = static_cast<uint32_t>(static_cast<int16_t>(getRegU32(ctx, 5)));
+        int32_t w = static_cast<int16_t>(getRegU32(ctx, 6));
+        int32_t h = static_cast<int16_t>(getRegU32(ctx, 7));
         const GsTrailingArgs2 trailing = decodeGsTrailingArgs2(rdram, ctx);
-        uint32_t dx = trailing.arg0;
-        uint32_t dy = trailing.arg1;
+        const int32_t dx = static_cast<int16_t>(trailing.arg0);
+        const int32_t dy = static_cast<int16_t>(trailing.arg1);
 
-        if (w == 0)
+        if (w <= 0)
             w = 640;
-        if (h == 0)
+        if (h <= 0)
             h = 448;
 
-        uint32_t fbw = (w + 63) / 64;
-        uint64_t dispfb = makeDispFb(0, fbw, psm, 0, 0);
-        uint64_t display = makeDisplay(dx, dy, 0, 0, w - 1, h - 1);
-
-        writeGsDispEnv(rdram, envAddr, display, dispfb);
+        GsDispEnvMem env{};
+        if (!readGsDispEnv(rdram, envAddr, env))
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+        libgraphDefDispEnv(env, psm, w, h, dx, dy);
+        std::memcpy(getMemPtr(rdram, envAddr), &env, sizeof(env));
         setReturnS32(ctx, 0);
     }
 
