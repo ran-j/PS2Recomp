@@ -889,10 +889,45 @@ namespace ps2_stubs
 
     void sceGsSetDefClear(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        (void)rdram;
-        (void)ctx;
         (void)runtime;
-        setReturnS32(ctx, 0);
+        // Mirrors libgraph: an A+D list (no GIFtag) of TEST(ZTST=ALWAYS), PRIM sprite, RGBAQ, two XYZ2
+        // corners and TEST(ztest). Games send it to wipe offscreen targets; without it they keep stale VRAM.
+        // Args: a0 clear, a1 ztest, a2 x, a3 y, t0 w, t1 h, t2 r, t3 g; b, a and z sit at sp+0, sp+8, sp+16.
+        const uint32_t clearAddr = getRegU32(ctx, 4);
+        const int16_t ztest = static_cast<int16_t>(getRegU32(ctx, 5));
+        const int16_t x = static_cast<int16_t>(getRegU32(ctx, 6));
+        const int16_t y = static_cast<int16_t>(getRegU32(ctx, 7));
+        const int16_t w = static_cast<int16_t>(getRegU32(ctx, 8));
+        const int16_t h = static_cast<int16_t>(getRegU32(ctx, 9));
+        const uint64_t r = getRegU32(ctx, 10) & 0xFFu;
+        const uint64_t g = getRegU32(ctx, 11) & 0xFFu;
+        const uint64_t b = readStackU32(rdram, ctx, 0) & 0xFFu;
+        const uint64_t a = readStackU32(rdram, ctx, 8) & 0xFFu;
+        const uint64_t z = readStackU32(rdram, ctx, 16);
+
+        auto xyz = [z](int32_t px, int32_t py)
+        {
+            return (static_cast<uint64_t>(static_cast<uint32_t>(px << 4)) & 0xFFFFu) |
+                   ((static_cast<uint64_t>(static_cast<uint32_t>(py << 4)) & 0xFFFFu) << 16) | (z << 32);
+        };
+
+        GsClearMem clear{};
+        clear.testa = {0x30000ULL, GS_REG_TEST_1};
+        clear.prim = {static_cast<uint64_t>(GS_PRIM_SPRITE), GS_REG_PRIM};
+        clear.rgbaq = {r | (g << 8) | (b << 16) | (a << 24) | (0x3F800000ULL << 32), GS_REG_RGBAQ};
+        clear.xyz2a = {xyz(x, y), GS_REG_XYZ2};
+        clear.xyz2b = {xyz(x + w, y + h), GS_REG_XYZ2};
+        const uint64_t restoreTest = ztest == 0 ? 0x30000ULL : ((static_cast<uint64_t>(ztest & 3) << 17) | 0x10000ULL);
+        clear.testb = {restoreTest, GS_REG_TEST_1};
+        uint8_t *dst = getMemPtr(rdram, clearAddr);
+        if (!dst)
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+        std::memcpy(dst, &clear, sizeof(clear));
+        // libgraph returns the packet length in qwords.
+        setReturnS32(ctx, static_cast<int32_t>(sizeof(clear) / 16u));
     }
 
     void sceGsSetDefDBuffDc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

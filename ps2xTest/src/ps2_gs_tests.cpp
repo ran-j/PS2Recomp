@@ -784,6 +784,51 @@ void register_ps2_gs_tests()
                      "context-targeted clear should leave the other context framebuffer untouched");
         });
 
+        tc.Run("sceGsSetDefClear builds a clear packet that wipes the target and restores TEST", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            constexpr uint32_t kClearAddr = 0x4000u;
+            constexpr uint32_t kSp = 0x8000u;
+
+            // libgraph ABI as compiled into the game: x..g in a2..t3, then b, a, z at sp+0, sp+8, sp+16.
+            R5900Context ctx{};
+            setRegU32(ctx, 4, kClearAddr);
+            setRegU32(ctx, 5, 2u); // ztest GEQUAL
+            setRegU32(ctx, 6, 0u);
+            setRegU32(ctx, 7, 0u);
+            setRegU32(ctx, 8, 8u);
+            setRegU32(ctx, 9, 8u);
+            setRegU32(ctx, 10, 0x11u);
+            setRegU32(ctx, 11, 0x22u);
+            setRegU32(ctx, 29, kSp);
+            const uint32_t b = 0x33u, a = 0x44u, z = 0x1234u;
+            std::memcpy(rdram.data() + kSp + 0u, &b, 4);
+            std::memcpy(rdram.data() + kSp + 8u, &a, 4);
+            std::memcpy(rdram.data() + kSp + 16u, &z, 4);
+            ps2_stubs::sceGsSetDefClear(rdram.data(), &ctx, &runtime);
+            t.Equals(getRegU32Test(ctx, 2), 6u, "sceGsSetDefClear should return the packet length in qwords");
+
+            uint64_t pairs[12]{};
+            std::memcpy(pairs, rdram.data() + kClearAddr, sizeof(pairs));
+            t.Equals(pairs[0], 0x30000ull, "the clear should draw with ZTST ALWAYS");
+            t.Equals(pairs[10], 0x50000ull, "the trailing TEST should restore the caller's ztest");
+            t.Equals(pairs[11], static_cast<uint64_t>(GS_REG_TEST_1), "TEST is written to context 1");
+
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0xABu);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+            gs.writeRegister(GS_REG_FRAME_1, (1ull << 16) | (static_cast<uint64_t>(GS_PSM_CT32) << 24));
+            gs.writeRegister(GS_REG_ZBUF_1, (64ull) | (1ull << 32));
+            gs.writeRegister(GS_REG_SCISSOR_1, (63ull << 16) | (63ull << 48));
+            gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
+            for (int i = 0; i < 6; ++i)
+                gs.writeRegister(static_cast<uint8_t>(pairs[i * 2 + 1]), pairs[i * 2]);
+
+            t.Equals(gs.ReadVram(GS_PSM_CT32, 0u, 1u, 3u, 3u), 0x44332211u, "pixels inside the clear rectangle take the clear colour");
+            t.Equals(gs.ReadVram(GS_PSM_CT32, 0u, 1u, 12u, 12u), 0xABABABABu, "pixels outside the rectangle are untouched");
+        });
+
         tc.Run("XYZ3 culls a triangle strip primitive without desynchronizing the vertex queue", [](TestCase &t)
         {
             std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
