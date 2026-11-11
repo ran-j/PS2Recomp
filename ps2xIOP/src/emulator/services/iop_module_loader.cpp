@@ -588,4 +588,35 @@ namespace ps2x::iop::detail
         reservation.address = 0u;
         return result;
     }
+
+    std::vector<uint8_t> IopModuleLoader::buildStartArguments(std::string_view moduleName,
+                                                              std::span<const uint8_t> arguments,
+                                                              uint32_t base,
+                                                              uint32_t &argc)
+    {
+        std::vector<std::string_view> strings{moduleName};
+        // The EE sends "a\0b\0..."; a trailing piece without its NUL still counts as an argument.
+        size_t start = 0u;
+        for (size_t i = 0u; i < arguments.size(); ++i)
+        {
+            if (arguments[i] != 0u)
+                continue;
+            strings.emplace_back(reinterpret_cast<const char *>(arguments.data()) + start, i - start);
+            start = i + 1u;
+        }
+        if (start < arguments.size())
+            strings.emplace_back(reinterpret_cast<const char *>(arguments.data()) + start, arguments.size() - start);
+
+        argc = static_cast<uint32_t>(strings.size());
+        const uint32_t tableBytes = (argc + 1u) * 4u;
+        std::vector<uint8_t> block(tableBytes, 0u);
+        for (uint32_t i = 0; i < argc; ++i)
+        {
+            const uint32_t pointer = base + static_cast<uint32_t>(block.size());
+            std::memcpy(block.data() + i * 4u, &pointer, sizeof(pointer));
+            block.insert(block.end(), strings[i].begin(), strings[i].end());
+            block.push_back(0u);
+        }
+        return block;
+    }
 }

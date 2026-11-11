@@ -6,7 +6,10 @@
 #include "emulator/imports/iop_dmacman.h"
 #include "emulator/imports/iop_imports.h"
 #include "emulator/imports/iop_loadcore.h"
+#include "emulator/imports/iop_stdio.h"
+#include "emulator/imports/iop_sysclib.h"
 #include "emulator/imports/iop_timrman.h"
+#include "emulator/services/iop_module_loader.h"
 #include "emulator/services/iop_rpc.h"
 #include "ps2x/iop/iop_host.h"
 
@@ -766,6 +769,106 @@ namespace
                expect(call(9u, kChannelSio2Out) == memory.read32(0x1F801558u), "dmac_ch_get_chcr should read the channel register") &&
                expect(call(28u, 6u, kSendBuffer, 1u, 1u) == 0u, "sceSetSliceDMA must reject the OTC channel");
     }
+
+    // Module entries get (argc, argv): CRI ADX reads "spucore=1" from argv and otherwise streams on
+    // core 0, where its looping block transfer then blocks every voice transfer on that DMA channel.
+    bool testModuleStartArgumentsBuildArgv()
+    {
+        const uint8_t raw[] = {'s', 'p', 'u', 'c', 'o', 'r', 'e', '=', '1', 0, 't', 'h', 'p', 'r', 'i', '=', '3', '9', 0};
+        constexpr uint32_t base = 0x40000u;
+        uint32_t argc = 0u;
+        const std::vector<uint8_t> block = IopModuleLoader::buildStartArguments("cri_adxi.irx", raw, base, argc);
+        const auto word = [&](uint32_t index)
+        {
+            uint32_t value = 0u;
+            std::memcpy(&value, block.data() + index * 4u, sizeof(value));
+            return value;
+        };
+        const auto string = [&](uint32_t index)
+        {
+            const uint32_t offset = word(index) - base;
+            return offset < block.size() ? std::string(reinterpret_cast<const char *>(block.data() + offset)) : std::string();
+        };
+        if (!expect(argc == 3u, "argc must count argv[0] plus each NUL-terminated argument") ||
+            !expect(string(0) == "cri_adxi.irx", "argv[0] must be the module name") ||
+            !expect(string(1) == "spucore=1" && string(2) == "thpri=39", "argv[1..] must be the SIF argument strings") ||
+            !expect(word(3) == 0u, "argv must be NULL-terminated"))
+            return false;
+
+        const uint8_t unterminated[] = {'a', 0, 'b', 'c'};
+        uint32_t tailArgc = 0u;
+        (void)IopModuleLoader::buildStartArguments("m", unterminated, 0u, tailArgc);
+        uint32_t emptyArgc = 0u;
+        const std::vector<uint8_t> empty = IopModuleLoader::buildStartArguments("m", {}, 0x100u, emptyArgc);
+        return expect(tailArgc == 3u, "a trailing argument without NUL must still be passed") &&
+               expect(emptyArgc == 1u && empty.size() == 8u + 2u, "no arguments must still pass argv[0] and a NULL");
+    }
+
+    // Drivers log their state through printf; an unexpanded "%d" hides the values needed to debug them.
+    bool testPrintfAndSprintfExpandArguments()
+    {
+        class LogHost final : public NullHost
+        {
+        public:
+            void log(LogLevel, std::string_view message) override { last = std::string(message); }
+            std::string last;
+        };
+
+        LogHost host;
+        IopMemory memory;
+        IopStdio stdio(host, memory);
+        IopSysclib sysclib(memory);
+        const char format[] = "Repeat %s %d %d %x %05u|%-3s|%c%%";
+        const char name[] = "Midi";
+        (void)memory.writeRam(0x30000u, format, sizeof(format));
+        (void)memory.writeRam(0x30100u, name, sizeof(name));
+
+        IopCpuState cpu{};
+        cpu.gpr[29] = 0x31000u;
+        cpu.gpr[4] = 0x30000u;
+        cpu.gpr[5] = 0x30100u;
+        cpu.gpr[6] = static_cast<uint32_t>(-2);
+        cpu.gpr[7] = 1u;
+        // Arguments past a3 live in the caller's outgoing area, starting at sp+16.
+        const uint32_t stackArgs[] = {0xBEEFu, 42u, 0x30102u, 'Z'};
+        (void)memory.writeRam(0x31010u, stackArgs, sizeof(stackArgs));
+        if (!expect(stdio.dispatchImport(4u, cpu), "printf was not handled") ||
+            !expect(host.last == "[IOP printf] Repeat Midi -2 1 beef 00042|di |Z%", "printf must expand register and stack arguments"))
+            return false;
+
+        // sprintf(buffer, format, ...) starts its arguments at a2.
+        const char sformat[] = "%s=%d";
+        (void)memory.writeRam(0x30200u, sformat, sizeof(sformat));
+        cpu.gpr[4] = 0x30300u;
+        cpu.gpr[5] = 0x30200u;
+        cpu.gpr[6] = 0x30100u;
+        cpu.gpr[7] = 7u;
+        char out[16] = {};
+        return expect(sysclib.dispatchImport(19u, cpu), "sprintf was not handled") &&
+               expect(memory.readRam(0x30300u, out, sizeof(out)) && std::string(out) == "Midi=7", "sprintf must expand its arguments") &&
+               expect(cpu.gpr[2] == 6u, "sprintf must return the formatted length");
+    }
+
+    // CRI ADX only accepts "spucore=1" when look_ctype_table reports argv[i][8] as a digit; a stub
+    // returning 0 left it streaming on core 0 and starved every voice transfer on that DMA channel.
+    bool testLookCtypeTableClassifiesCharacters()
+    {
+        IopMemory memory;
+        IopSysclib sysclib(memory);
+        const auto look = [&](char c)
+        {
+            IopCpuState cpu{};
+            cpu.gpr[4] = static_cast<uint32_t>(static_cast<int32_t>(c));
+            cpu.gpr[2] = 0xFFFFu;
+            return sysclib.dispatchImport(8u, cpu) ? cpu.gpr[2] : 0xFFFFu;
+        };
+        return expect(look('1') == 0x04u, "digits must report _N") &&
+               expect(look('A') == 0x41u && look('Z') == 0x01u, "upper case must report _U (and _X for A-F)") &&
+               expect(look('f') == 0x42u && look('g') == 0x02u, "lower case must report _L (and _X for a-f)") &&
+               expect(look(' ') == 0x88u && look('\n') == 0x28u, "white space must report _S") &&
+               expect(look('=') == 0x10u && look('\x01') == 0x20u, "punctuation and control characters must be classified") &&
+               expect(look('\xC0') == 0u, "characters above ASCII have no class");
+    }
 }
 
 int main()
@@ -774,7 +877,8 @@ int main()
         !testTimrmanPeriodicCallback() || !testSio2MemoryCard() || !testSliceEndDoesNotHandTheCpuToAnEqualPriorityThread() ||
         !testSliceEndInsideCpuSuspendIntrResumesSameThread() || !testSpu2AutoDmaCompletesAtPlaybackRate() ||
         !testDmacmanDrivesSio2Dma() || !testSio2DualShock2() || !testSifGetOtherData() || !testUnalignedLoadPair() ||
-        !testRpcServerKeepsItsThreadPriority())
+        !testRpcServerKeepsItsThreadPriority() || !testModuleStartArgumentsBuildArgv() ||
+        !testPrintfAndSprintfExpandArguments() || !testLookCtypeTableClassifiesCharacters())
         return 1;
     std::cout << "ps2xIOP import tests passed\n";
     return 0;

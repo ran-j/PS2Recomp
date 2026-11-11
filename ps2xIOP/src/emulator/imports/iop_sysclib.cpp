@@ -1,4 +1,5 @@
 #include "iop_sysclib.h"
+#include "iop_format.h"
 
 #include "../core/iop_cpu.h"
 #include "../core/iop_memory.h"
@@ -11,6 +12,38 @@
 
 namespace ps2x::iop::detail
 {
+    namespace
+    {
+        // newlib/sysclib ctype flags: upper, lower, digit, space, punct, control, hex, blank.
+        constexpr uint8_t kCtypeUpper = 0x01u;
+        constexpr uint8_t kCtypeLower = 0x02u;
+        constexpr uint8_t kCtypeDigit = 0x04u;
+        constexpr uint8_t kCtypeSpace = 0x08u;
+        constexpr uint8_t kCtypePunct = 0x10u;
+        constexpr uint8_t kCtypeControl = 0x20u;
+        constexpr uint8_t kCtypeHex = 0x40u;
+        constexpr uint8_t kCtypeBlank = 0x80u;
+
+        uint8_t lookCtype(uint8_t c)
+        {
+            if (c >= '0' && c <= '9')
+                return kCtypeDigit;
+            if (c >= 'A' && c <= 'Z')
+                return static_cast<uint8_t>(kCtypeUpper | (c <= 'F' ? kCtypeHex : 0u));
+            if (c >= 'a' && c <= 'z')
+                return static_cast<uint8_t>(kCtypeLower | (c <= 'f' ? kCtypeHex : 0u));
+            if (c == ' ')
+                return static_cast<uint8_t>(kCtypeSpace | kCtypeBlank);
+            if (c >= '\t' && c <= '\r')
+                return static_cast<uint8_t>(kCtypeControl | kCtypeSpace);
+            if (c < 0x20u || c == 0x7Fu)
+                return kCtypeControl;
+            if (c < 0x7Fu)
+                return kCtypePunct;
+            return 0u;
+        }
+    }
+
     IopSysclib::IopSysclib(IopMemory &memory) noexcept
         : m_memory(memory)
     {
@@ -73,8 +106,10 @@ namespace ps2x::iop::detail
         case 7:
             setV0(static_cast<uint32_t>(std::tolower(static_cast<unsigned char>(a0))));
             return true;
-        case 8:
-        case 9: // ctype table is optional for most IRXs.
+        case 8: // look_ctype_table: isdigit()/isspace() in IRXs test these flags, e.g. when parsing module args.
+            setV0(lookCtype(static_cast<uint8_t>(a0)));
+            return true;
+        case 9: // get_ctype_table: no guest-resident table yet.
             setV0(0);
             return true;
         case 10: // memchr
@@ -124,15 +159,28 @@ namespace ps2x::iop::detail
         case 18: // prnt
             setV0(0);
             return true;
-        case 19: // sprintf: preserve useful literal formats even before full vararg formatting.
-        case 42: // vsprintf fallback: copy format literal.
+        case 19: // sprintf
+        case 42: // vsprintf
         {
-            const std::string format = m_memory.readString(a1, 4096u);
-            for (size_t i = 0; i <= format.size(); ++i)
+            uint32_t slot = 2u;
+            uint32_t argList = a2;
+            const auto nextArg = [&]() -> uint32_t
             {
-                m_memory.write8(a0 + static_cast<uint32_t>(i), i < format.size() ? static_cast<uint8_t>(format[i]) : 0u);
+                if (ordinal == 42u)
+                {
+                    const uint32_t value = m_memory.read32(argList);
+                    argList += 4u;
+                    return value;
+                }
+                const uint32_t index = slot++;
+                return index < 4u ? cpu.gpr[4u + index] : m_memory.read32(cpu.gpr[29] + index * 4u);
+            };
+            const std::string text = formatIopString(m_memory, m_memory.readString(a1, 4096u), nextArg);
+            for (size_t i = 0; i <= text.size(); ++i)
+            {
+                m_memory.write8(a0 + static_cast<uint32_t>(i), i < text.size() ? static_cast<uint8_t>(text[i]) : 0u);
             }
-            setV0(static_cast<uint32_t>(format.size()));
+            setV0(static_cast<uint32_t>(text.size()));
             return true;
         }
         case 20:

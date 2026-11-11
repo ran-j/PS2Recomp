@@ -182,6 +182,35 @@ namespace
         std::memcpy(host.guest.data() + address + codeOffset, code, sizeof(code));
     }
 
+    // Entry returns (argc << 16) | (argv[1][0] << 8) | argv[2][0], or -1 when argv[argc] is not NULL.
+    void writeArgvProbeIrx(TestHost &host, uint32_t address)
+    {
+        writeMinimalIrx(host, address);
+        const uint32_t code[] = {
+            0x00041400u, // sll   v0, a0, 16
+            0x8CA80004u, // lw    t0, 4(a1)
+            0x8CAA0008u, // lw    t2, 8(a1)
+            0x8CAC000Cu, // lw    t4, 12(a1)
+            0x91090000u, // lbu   t1, 0(t0)
+            0x914B0000u, // lbu   t3, 0(t2)
+            0x00000000u, // nop
+            0x00094A00u, // sll   t1, t1, 8
+            0x00491025u, // or    v0, v0, t1
+            0x004B1025u, // or    v0, v0, t3
+            0x11800002u, // beq   t4, zero, +2
+            0x00000000u, // nop
+            0x2402FFFFu, // addiu v0, zero, -1
+            0x03E00008u, // jr    ra
+            0x00000000u, // nop
+        };
+        ProgramHeader program{};
+        std::memcpy(&program, host.guest.data() + address + sizeof(ElfHeader), sizeof(program));
+        program.filesz = sizeof(code);
+        program.memsz = sizeof(code);
+        std::memcpy(host.guest.data() + address + sizeof(ElfHeader), &program, sizeof(program));
+        std::memcpy(host.guest.data() + address + 0x100u, code, sizeof(code));
+    }
+
     void writeRpcServerIrx(TestHost &host,
                            uint32_t address,
                            uint32_t sid = 0xF00DCAFEu,
@@ -1458,6 +1487,14 @@ int main()
         { return message.find("unhandled import cdvdman:7") != std::string::npos; });
     if (!expect(!emittedUnhandledSeek,
                 "sceCdSeek still emitted an unhandled IOP import")) return 1;
+
+    // loadcore hands module entries (argc, argv), not the raw SIF argument block.
+    iop.reset();
+    writeArgvProbeIrx(host, 0x100u);
+    const char probeArgs[] = "a=1\0bcd";
+    const ModuleLoadResult argvProbe = iop.loadModuleBuffer(0x100u, probeArgs, sizeof(probeArgs));
+    if (!expect(argvProbe.handled && argvProbe.startResult == static_cast<int32_t>((3u << 16) | ('a' << 8) | 'b'),
+                "IRX entry did not receive argc/argv built from the SIF arguments")) return 1;
 
     std::cout << "ps2xIOP emulator smoke tests passed\n";
     return 0;

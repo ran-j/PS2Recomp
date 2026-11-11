@@ -3,6 +3,9 @@
 #include "ps2_host_backend.h"
 
 #include <algorithm>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 Spu2FrameRing::Spu2FrameRing(size_t capacityFrames, size_t prebufferFrames, size_t maxLatencyFrames)
@@ -149,8 +152,75 @@ Spu2AudioOutput::Spu2AudioOutput() : m_impl(std::make_unique<Impl>())
 
 Spu2AudioOutput::~Spu2AudioOutput() = default;
 
+namespace
+{
+    // PS2X_AUDIO_CAPTURE=<file.wav> records the SPU2 mix as the runtime produces it, independent
+    // of the host device, so audio regressions can be compared offline.
+    class Spu2WavCapture
+    {
+    public:
+        Spu2WavCapture()
+        {
+            const char *path = std::getenv("PS2X_AUDIO_CAPTURE");
+            if (!path || !*path)
+                return;
+            m_file = std::fopen(path, "wb");
+            if (!m_file)
+            {
+                std::fprintf(stderr, "[audio] PS2X_AUDIO_CAPTURE: cannot open '%s' for writing\n", path);
+                return;
+            }
+            writeHeader();
+        }
+
+        ~Spu2WavCapture()
+        {
+            if (m_file)
+                std::fclose(m_file);
+        }
+
+        void append(const int16_t *samples, size_t frames)
+        {
+            if (!m_file || frames == 0u)
+                return;
+            std::fwrite(samples, sizeof(int16_t) * 2u, frames, m_file);
+            m_dataBytes += static_cast<uint32_t>(frames * sizeof(int16_t) * 2u);
+            // Keep the header valid so a killed process still leaves a playable file.
+            writeHeader();
+            std::fseek(m_file, 0, SEEK_END);
+        }
+
+    private:
+        static void put32(uint8_t *p, uint32_t v)
+        {
+            p[0] = static_cast<uint8_t>(v);
+            p[1] = static_cast<uint8_t>(v >> 8u);
+            p[2] = static_cast<uint8_t>(v >> 16u);
+            p[3] = static_cast<uint8_t>(v >> 24u);
+        }
+
+        void writeHeader()
+        {
+            uint8_t h[44] = {'R', 'I', 'F', 'F', 0, 0, 0, 0, 'W', 'A', 'V', 'E', 'f', 'm', 't', ' ',
+                             16, 0, 0, 0, 1, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 16, 0,
+                             'd', 'a', 't', 'a', 0, 0, 0, 0};
+            put32(h + 4, 36u + m_dataBytes);
+            put32(h + 24, kSpu2SampleRate);
+            put32(h + 28, kSpu2SampleRate * 4u);
+            put32(h + 40, m_dataBytes);
+            std::fseek(m_file, 0, SEEK_SET);
+            std::fwrite(h, 1, sizeof(h), m_file);
+        }
+
+        std::FILE *m_file = nullptr;
+        uint32_t m_dataBytes = 0u;
+    };
+}
+
 void Spu2AudioOutput::submit(const int16_t *samples, size_t frames)
 {
+    static Spu2WavCapture capture;
+    capture.append(samples, frames);
     if (!m_impl->started && !m_impl->unavailable)
         m_impl->start();
     if (m_impl->started)

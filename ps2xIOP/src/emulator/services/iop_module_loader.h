@@ -45,5 +45,12 @@ namespace ps2x::iop::detail
         [[nodiscard]] static bool readElfFromGuest(IopHost &host, uint32_t guestAddress, std::vector<uint8_t> &bytes);
         [[nodiscard]] static bool readElfFromIopRam(const IopMemory &memory, uint32_t iopAddress, std::vector<uint8_t> &bytes);
         [[nodiscard]] static IopImageLoadResult load(std::span<const uint8_t> image, IopMemory &memory);
+        // Lays out the (argc, argv) a module entry receives, as loadcore does: argv[0] is the module
+        // name, then each NUL-terminated string of the SIF argument block, then a NULL terminator.
+        // The block is meant to be copied to IOP address `base`; argv pointers are absolute.
+        [[nodiscard]] static std::vector<uint8_t> buildStartArguments(std::string_view moduleName,
+                                                                      std::span<const uint8_t> arguments,
+                                                                      uint32_t base,
+                                                                      uint32_t &argc);
     };
 }

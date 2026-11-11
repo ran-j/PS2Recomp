@@ -763,17 +763,23 @@ namespace ps2x::iop::detail
             module.gp = loaded.gp;
             module.reserved = loaded.reserved;
 
-            uint32_t args = 0u;
-            if (arguments && argumentSize)
+            // Module entries take (argc, argv); drivers such as CRI ADX read their configuration
+            // ("spucore=1", thread priorities) from argv and silently fall back to defaults otherwise.
+            const std::span<const uint8_t> rawArguments(static_cast<const uint8_t *>(arguments),
+                                                        arguments ? argumentSize : 0u);
+            uint32_t argc = 0u;
+            const size_t argvBytes = IopModuleLoader::buildStartArguments(module.name, rawArguments, 0u, argc).size();
+            uint32_t args = allocate(static_cast<uint32_t>(argvBytes), 16u);
+            if (args)
             {
-                args = allocate(argumentSize + 1u, 16u);
-                if (args)
-                {
-                    writeRam(args, arguments, argumentSize);
-                    write8(args + argumentSize, 0u);
-                }
+                const std::vector<uint8_t> argv = IopModuleLoader::buildStartArguments(module.name, rawArguments, args, argc);
+                writeRam(args, argv.data(), argv.size());
             }
-            const uint32_t startResult = callFunction(module.entry, argumentSize, args, 0u, 0u, module.gp);
+            else
+            {
+                argc = 0u;
+            }
+            const uint32_t startResult = callFunction(module.entry, argc, args, 0u, 0u, module.gp);
             if (args)
                 freeAllocation(args);
             module.resident = startResult == 0u || startResult == 2u;
@@ -788,6 +794,13 @@ namespace ps2x::iop::detail
                 << " start=" << std::dec << result.startResult;
             if (const std::string library = exportedLibraryName(modules[result.moduleId]); !library.empty())
                 out << " exports=" << library;
+            if (argc > 1u)
+            {
+                out << " args=\"";
+                for (const uint8_t c : rawArguments)
+                    out << (c == 0u ? ' ' : static_cast<char>(c));
+                out << '"';
+            }
             log(LogLevel::Info, out.str());
             return result;
         }
