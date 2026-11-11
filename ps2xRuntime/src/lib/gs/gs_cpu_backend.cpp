@@ -2458,7 +2458,8 @@ namespace
     }
 }
 
-void GSCpuBackend::RecordUndo(const PixelPipeline &pipe, const uint8_t *pixel, int x, int y)
+// Runs for most pixels of a tracked batch; as a call it cost about 5% of their raster time.
+__attribute__((always_inline)) inline void GSCpuBackend::RecordUndo(const PixelPipeline &pipe, const uint8_t *pixel, int x, int y)
 {
     // Only RGB24/Z24 targets write tracked pages, so the whole word is the pixel's.
     const uint32_t offset = static_cast<uint32_t>(pixel - m_vram);
