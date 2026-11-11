@@ -784,6 +784,26 @@ void register_ps2_vu_tests()
                      "NormalLightMatrix should transpose the light-direction rows into columns");
         });
 
+        tc.Run("NormalLightMatrix_ignores_light_w", [](TestCase &t)
+        {
+            // Lights stored as positions carry w=1; libvu0's Normalize uses xyz only and clears w.
+            VuEnv env;
+            writeVec4(env, kA, 0.0f, 0.0f, 2.0f, 1.0f);
+            writeVec4(env, kB, 0.0f, 3.0f, 0.0f, 1.0f);
+            writeVec4(env, kC, 4.0f, 0.0f, 0.0f, 1.0f);
+            SET_GPR_U32(&env.ctx, 4, kDst);
+            SET_GPR_U32(&env.ctx, 5, kA);
+            SET_GPR_U32(&env.ctx, 6, kB);
+            SET_GPR_U32(&env.ctx, 7, kC);
+            ps2_stubs::sceVu0NormalLightMatrix(env.rdram.data(), &env.ctx, &env.runtime);
+            float out[16]{};
+            readMat4(env, kDst, out);
+            t.IsTrue(nearlyEqual(out[8], -1.0f) && nearlyEqual(out[5], -1.0f) && nearlyEqual(out[2], -1.0f),
+                     "each light column should be the unit -xyz direction");
+            t.IsTrue(out[12] == 0.0f && out[13] == 0.0f && out[14] == 0.0f && out[15] == 1.0f,
+                     "row 3 should be (0,0,0,1) whatever the lights' w");
+        });
+
         tc.Run("LightColorMatrix_verbatim_rows", [](TestCase &t)
         {
             VuEnv env;
