@@ -97,6 +97,22 @@ void register_ps2_vu_tests()
                      "MulVector should multiply lanes component-wise");
         });
 
+        tc.Run("ScaleVector_zero_scale_ignores_a2", [](TestCase &t)
+        {
+            // libvu0 reads the scale from f12 only; a stale a2 must not stand in for a 0.0f scale.
+            VuEnv env;
+            writeVec4(env, kA, 2.0f, 4.0f, 6.0f, 8.0f);
+            env.ctx.f[12] = 0.0f;
+            SET_GPR_U32(&env.ctx, 4, kDst);
+            SET_GPR_U32(&env.ctx, 5, kA);
+            SET_GPR_U32(&env.ctx, 6, 0x3F800000u);
+            ps2_stubs::sceVu0ScaleVector(env.rdram.data(), &env.ctx, &env.runtime);
+            float out[4]{};
+            readVec4f(env, kDst, out);
+            t.IsTrue(out[0] == 0.0f && out[1] == 0.0f && out[2] == 0.0f && out[3] == 0.0f,
+                     "ScaleVector by 0.0f should zero every lane");
+        });
+
         tc.Run("ScaleVectorXYZ_scales_xyz", [](TestCase &t)
         {
             VuEnv env;

@@ -934,16 +934,8 @@ namespace ps2_stubs
         const uint32_t dstAddr = getRegU32(ctx, 4);
         const uint32_t srcAddr = getRegU32(ctx, 5);
         float src[4]{}, out[4]{};
-        float scale = ctx ? ctx->f[12] : 0.0f;
-        if (scale == 0.0f)
-        {
-            uint32_t raw = getRegU32(ctx, 6);
-            std::memcpy(&scale, &raw, sizeof(scale));
-            if (scale == 0.0f)
-            {
-                scale = static_cast<float>(getRegU32(ctx, 6));
-            }
-        }
+        // libvu0 takes the scale from f12 only; a2 is not an argument, so a 0.0f scale must yield zero.
+        const float scale = ctx ? ctx->f[12] : 0.0f;
 
         if (readVuVec4f(rdram, srcAddr, src))
         {
