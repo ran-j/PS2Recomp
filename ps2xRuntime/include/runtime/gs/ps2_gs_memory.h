@@ -554,6 +554,40 @@ namespace GSMem
     using PixelOffsetFn = u32 (*)(u32 bp, u32 bw, u32 x, u32 y);
     PixelOffsetFn TargetPixelOffset(u32 psm);
 
+    // Page tables of the drawable targets (filled by InitLookupTables).
+    extern PixelStorageTraits<C32>::PageLookupTableT PageTableC32;
+    extern PixelStorageTraits<Z32>::PageLookupTableT PageTableZ32;
+    extern PixelStorageTraits<C16>::PageLookupTableT PageTableC16;
+    extern PixelStorageTraits<C16S>::PageLookupTableT PageTableC16S;
+    extern PixelStorageTraits<Z16>::PageLookupTableT PageTableZ16;
+    extern PixelStorageTraits<Z16S>::PageLookupTableT PageTableZ16S;
+
+    // What TargetPixelOffset(psm) returns, for a format known at compile time, so the rasterizer's
+    // per-pixel addressing inlines instead of going through a function pointer.
+    template <PixelStorageMode psm>
+    inline u32 TargetOffset(u32 bp, u32 bw, u32 x, u32 y)
+    {
+        using Traits = PixelStorageTraits<psm>;
+        const auto &table = []() -> const typename Traits::PageLookupTableT &
+        {
+            if constexpr (psm == C32 || psm == C24)
+                return PageTableC32;
+            else if constexpr (psm == Z32 || psm == Z24)
+                return PageTableZ32;
+            else if constexpr (psm == C16)
+                return PageTableC16;
+            else if constexpr (psm == C16S)
+                return PageTableC16S;
+            else if constexpr (psm == Z16)
+                return PageTableZ16;
+            else
+                return PageTableZ16S;
+        }();
+        const u32 pixel_addr = Traits::Address(table, bp, bw, x, y);
+        const u32 bits = pixel_addr * UnpackedBitWidth(psm) + Traits::BitOffset();
+        return (bits / 8) & (MEMORY_SIZE - sizeof(typename Traits::PackedT));
+    }
+
 	void WriteCT32(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value);
 	void WriteZ32(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 value);
 

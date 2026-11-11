@@ -2322,6 +2322,50 @@ void GSCpuBackend::DrawPrimitiveRows(const GSPrimitiveBatch &batch, const Raster
     }
 }
 
+namespace
+{
+    template <uint32_t Value>
+    using FormatTag = std::integral_constant<uint32_t, Value>;
+
+    // Calls write(frameTag, depthTag) with the target formats as compile-time constants for the
+    // combinations 3D scenes draw with, and as GSCpuBackend::kAnyTarget otherwise.
+    template <typename Write>
+    __attribute__((always_inline)) inline void dispatchTargetFormats(uint32_t fpsm, uint32_t zpsm, Write &&write)
+    {
+        constexpr uint32_t kAny = 0xFFu;
+        auto withDepth = [&](auto frameTag)
+        {
+            switch (zpsm)
+            {
+            case GS_PSM_Z32:
+                write(frameTag, FormatTag<GS_PSM_Z32>{});
+                return;
+            case GS_PSM_Z24:
+                write(frameTag, FormatTag<GS_PSM_Z24>{});
+                return;
+            case GS_PSM_Z16S:
+                write(frameTag, FormatTag<GS_PSM_Z16S>{});
+                return;
+            default:
+                write(FormatTag<kAny>{}, FormatTag<kAny>{});
+                return;
+            }
+        };
+        switch (fpsm)
+        {
+        case GS_PSM_CT32:
+            withDepth(FormatTag<GS_PSM_CT32>{});
+            return;
+        case GS_PSM_CT24:
+            withDepth(FormatTag<GS_PSM_CT24>{});
+            return;
+        default:
+            write(FormatTag<kAny>{}, FormatTag<kAny>{});
+            return;
+        }
+    }
+}
+
 struct GSCpuBackend::PixelPipeline
 {
     const GSDrawState *state = nullptr;
@@ -2431,6 +2475,15 @@ void GSCpuBackend::RecordUndo(const PixelPipeline &pipe, const uint8_t *pixel, i
 
 __attribute__((always_inline)) inline bool GSCpuBackend::WritePixel(const PixelPipeline &pipe, int x, int y, int z, uint8_t r, uint8_t g, uint8_t b, uint8_t a, uint8_t fog)
 {
+    return WritePixelFor<kAnyTarget, kAnyTarget>(pipe, x, y, z, r, g, b, a, fog);
+}
+
+template <uint32_t FramePsm, uint32_t DepthPsm>
+__attribute__((always_inline)) inline bool GSCpuBackend::WritePixelFor(const PixelPipeline &pipe, int x, int y, int z, uint8_t r, uint8_t g, uint8_t b, uint8_t a, uint8_t fog)
+{
+    // With the formats fixed, the format switches below fold away and addressing inlines.
+    constexpr bool knownFrame = FramePsm != kAnyTarget;
+    constexpr bool knownDepth = DepthPsm != kAnyTarget;
     const GSDrawState &state = *pipe.state;
     const auto &ctx = state.context;
     if (x < ctx.scissor.x0 || x > ctx.scissor.x1 || y < ctx.scissor.y0 || y > ctx.scissor.y1)
@@ -2451,9 +2504,26 @@ __attribute__((always_inline)) inline bool GSCpuBackend::WritePixel(const PixelP
 
     const u32 fbp = pipe.fbp;
     const u32 fbw = pipe.fbw;
-    const u32 fpsm = pipe.fpsm;
+    const u32 fpsm = knownFrame ? FramePsm : pipe.fpsm;
     const u32 zbp = pipe.zbp;
-    const u32 zpsm = pipe.zpsm;
+    const u32 zpsm = knownDepth ? DepthPsm : pipe.zpsm;
+    auto frameOffset = [&]() -> u32
+    {
+        if constexpr (knownFrame)
+            return GSMem::TargetOffset<static_cast<GSMem::PixelStorageMode>(FramePsm)>(fbp, fbw, static_cast<u32>(x), static_cast<u32>(y));
+        else
+            return pipe.frameOffset(fbp, fbw, static_cast<u32>(x), static_cast<u32>(y));
+    };
+    auto depthOffset = [&]() -> u32
+    {
+        if constexpr (knownDepth)
+            return GSMem::TargetOffset<static_cast<GSMem::PixelStorageMode>(DepthPsm)>(zbp, fbw, static_cast<u32>(x), static_cast<u32>(y));
+        else
+            return pipe.depthOffset(zbp, fbw, static_cast<u32>(x), static_cast<u32>(y));
+    };
+    const bool hasFrameOffset = knownFrame || pipe.frameOffset != nullptr;
+    const bool hasDepthOffset = knownDepth || pipe.depthOffset != nullptr;
+    const bool framebuffer16 = knownFrame ? bitsPerPixel(FramePsm) == 16 : pipe.framebuffer16;
 
     const PixelWriteMask writeMask = classifyAlphaTest(ctx.test, a, static_cast<uint8_t>(fpsm));
     if (!writeMask.writesAnything())
@@ -2475,9 +2545,9 @@ __attribute__((always_inline)) inline bool GSCpuBackend::WritePixel(const PixelP
     uint8_t *framePixel = nullptr;
     if (frmw)
     {
-        if (pipe.frameOffset)
+        if (hasFrameOffset)
         {
-            framePixel = m_vram + pipe.frameOffset(fbp, fbw, static_cast<u32>(x), static_cast<u32>(y));
+            framePixel = m_vram + frameOffset();
             rawFramebufferPixel = readTarget(fpsm, framePixel);
         }
         else
@@ -2486,7 +2556,7 @@ __attribute__((always_inline)) inline bool GSCpuBackend::WritePixel(const PixelP
         }
         fbrgba = rawFramebufferPixel;
 
-        if (pipe.framebuffer16)
+        if (framebuffer16)
         {
             fbrgba = Rgba5551ToRgba8888(fbrgba);
         }
@@ -2507,9 +2577,9 @@ __attribute__((always_inline)) inline bool GSCpuBackend::WritePixel(const PixelP
     uint8_t *depthPixel = nullptr;
     auto readDepth = [&]() -> uint32_t
     {
-        if (!pipe.depthOffset)
+        if (!hasDepthOffset)
             return ReadVramUnlocked(zpsm, zbp, fbw, x, y);
-        depthPixel = m_vram + pipe.depthOffset(zbp, fbw, static_cast<u32>(x), static_cast<u32>(y));
+        depthPixel = m_vram + depthOffset();
         return readTarget(zpsm, depthPixel);
     };
     switch (ztestMethod)
@@ -2598,16 +2668,16 @@ __attribute__((always_inline)) inline bool GSCpuBackend::WritePixel(const PixelP
         }
 
         // format conversion
-        if (pipe.framebuffer16)
+        if (framebuffer16)
         {
             pixel = Rgba8888ToRgba5551(pixel);
         }
 
         // PrepareTexturePageCache already made the texture page cache safe for this primitive's writes.
-        if (pipe.frameOffset)
+        if (hasFrameOffset)
         {
             if (!framePixel)
-                framePixel = m_vram + pipe.frameOffset(fbp, fbw, static_cast<u32>(x), static_cast<u32>(y));
+                framePixel = m_vram + frameOffset();
             if (pipe.undo)
                 RecordUndo(pipe, framePixel, x, y);
             writeTarget(fpsm, framePixel, pixel);
@@ -2620,10 +2690,10 @@ __attribute__((always_inline)) inline bool GSCpuBackend::WritePixel(const PixelP
 
     if (writeMask.writeDepth && !ctx.zbuf.zmask)
     {
-        if (pipe.depthOffset)
+        if (hasDepthOffset)
         {
             if (!depthPixel)
-                depthPixel = m_vram + pipe.depthOffset(zbp, fbw, static_cast<u32>(x), static_cast<u32>(y));
+                depthPixel = m_vram + depthOffset();
             if (pipe.undo)
                 RecordUndo(pipe, depthPixel, x, y);
             writeTarget(zpsm, depthPixel, static_cast<uint32_t>(z));
@@ -2634,6 +2704,146 @@ __attribute__((always_inline)) inline bool GSCpuBackend::WritePixel(const PixelP
         }
     }
     return true;
+}
+
+template <uint32_t FramePsm, uint32_t DepthPsm>
+uint32_t GSCpuBackend::WriteSpanFor(const PixelPipeline &pipe, int y, SpanPixels &span)
+{
+    // WritePixelFor pixel by pixel waits on each pixel's address lookups and loads before the next pixel
+    // starts. A batched primitive's pixels in one row are distinct colour and depth words that nothing else
+    // in the chunk touches (colour and depth never share pages in a batch), so the addresses and loads of
+    // the whole span go first and only the stores keep their order.
+    const GSDrawState &state = *pipe.state;
+    const auto &ctx = state.context;
+    const int n = span.count;
+    constexpr uint32_t fpsm = FramePsm;
+    constexpr uint32_t zpsm = DepthPsm;
+    const u32 fbp = pipe.fbp;
+    const u32 fbw = pipe.fbw;
+    const u32 zbp = pipe.zbp;
+    const bool rowInScissor = y >= ctx.scissor.y0 && y <= ctx.scissor.y1;
+
+    uint32_t frameOff[SpanPixels::kMax];
+    uint32_t depthOff[SpanPixels::kMax];
+    uint32_t frameRaw[SpanPixels::kMax];
+    uint32_t depthRaw[SpanPixels::kMax];
+    uint8_t mask[SpanPixels::kMax]; // bit0 rgb, bit1 alpha, bit2 depth; 0 skips the pixel
+    for (int i = 0; i < n; ++i)
+    {
+        const int x = span.x[i];
+        if (pipe.fge)
+        {
+            const uint8_t fog = span.fog[i];
+            const uint32_t inverseFog = 255u - fog;
+            auto applyFog = [&](uint8_t input, uint8_t fogColor) -> uint8_t
+            {
+                return static_cast<uint8_t>(((static_cast<uint32_t>(fog) * input) >> 8) + ((inverseFog * fogColor) >> 8));
+            };
+            span.r[i] = applyFog(span.r[i], state.fogR);
+            span.g[i] = applyFog(span.g[i], state.fogG);
+            span.b[i] = applyFog(span.b[i], state.fogB);
+        }
+        const PixelWriteMask writeMask = classifyAlphaTest(ctx.test, span.a[i], static_cast<uint8_t>(fpsm));
+        const bool inside = rowInScissor && x >= ctx.scissor.x0 && x <= ctx.scissor.x1;
+        mask[i] = inside ? static_cast<uint8_t>((writeMask.writeRgb ? 1u : 0u) | (writeMask.writeAlpha ? 2u : 0u) | (writeMask.writeDepth ? 4u : 0u)) : 0u;
+        frameOff[i] = GSMem::TargetOffset<static_cast<GSMem::PixelStorageMode>(FramePsm)>(fbp, fbw, static_cast<u32>(x), static_cast<u32>(y));
+        depthOff[i] = GSMem::TargetOffset<static_cast<GSMem::PixelStorageMode>(DepthPsm)>(zbp, fbw, static_cast<u32>(x), static_cast<u32>(y));
+    }
+    for (int i = 0; i < n; ++i)
+    {
+        frameRaw[i] = readTarget(fpsm, m_vram + frameOff[i]);
+        depthRaw[i] = readTarget(zpsm, m_vram + depthOff[i]);
+    }
+
+    uint32_t written = 0u;
+    const uint32_t ztestMethod = pipe.ztestMethod;
+    for (int i = 0; i < n; ++i)
+    {
+        if (mask[i] == 0u)
+            continue;
+        const bool writeRgb = (mask[i] & 1u) != 0u;
+        const bool writeAlpha = (mask[i] & 2u) != 0u;
+        const bool writeDepth = (mask[i] & 4u) != 0u;
+        const bool writesFramebuffer = writeRgb || writeAlpha;
+        const int x = span.x[i];
+        const int z = span.z[i];
+        uint8_t r = span.r[i], g = span.g[i], b = span.b[i], a = span.a[i];
+        const bool preserveDestinationAlpha = writeRgb && !writeAlpha && fpsm == GS_PSM_CT32;
+        const bool frmw = pipe.destinationAlphaTestNeedsRead ||
+                          (writesFramebuffer && ((ctx.frame.fbmsk != 0) || state.prim.abe || preserveDestinationAlpha));
+        u32 rawFramebufferPixel = 0;
+        u32 fbrgba = 0;
+        if (frmw)
+        {
+            rawFramebufferPixel = frameRaw[i];
+            fbrgba = rawFramebufferPixel;
+            if (fpsm == GS_PSM_CT24)
+                fbrgba |= 0x80000000u;
+        }
+        if (!passesDestinationAlphaTest(ctx.test, static_cast<uint8_t>(fpsm), rawFramebufferPixel))
+            continue;
+        bool zpass = false;
+        switch (ztestMethod)
+        {
+        case 0:
+            zpass = false;
+            break;
+        case 1:
+            zpass = true;
+            break;
+        case 2:
+            zpass = static_cast<uint32_t>(z) >= depthRaw[i];
+            break;
+        case 3:
+            zpass = static_cast<uint32_t>(z) > depthRaw[i];
+            break;
+        }
+        if (!zpass)
+            continue;
+
+        if (writesFramebuffer)
+        {
+            if (state.prim.abe && !(state.pabe && (a & 0x80u) == 0u))
+            {
+                const int dr = static_cast<int>(fbrgba & 0xFF);
+                const int dg = static_cast<int>((fbrgba >> 8) & 0xFF);
+                const int db = static_cast<int>((fbrgba >> 16) & 0xFF);
+                const int da = static_cast<int>((fbrgba >> 24) & 0xFF);
+                auto pickRGB = [](uint8_t sel, int cs, int cd) -> int
+                {
+                    if (sel == 0)
+                        return cs;
+                    if (sel == 1)
+                        return cd;
+                    return 0;
+                };
+                const int cAlpha = (pipe.csel == 0) ? a : (pipe.csel == 1) ? da : pipe.fix;
+                r = clampU8(((pickRGB(pipe.asel, r, dr) - pickRGB(pipe.bsel, r, dr)) * cAlpha >> 7) + pickRGB(pipe.dsel, r, dr));
+                g = clampU8(((pickRGB(pipe.asel, g, dg) - pickRGB(pipe.bsel, g, dg)) * cAlpha >> 7) + pickRGB(pipe.dsel, g, dg));
+                b = clampU8(((pickRGB(pipe.asel, b, db) - pickRGB(pipe.bsel, b, db)) * cAlpha >> 7) + pickRGB(pipe.dsel, b, db));
+            }
+            if (writeAlpha && pipe.fbaSetsAlpha)
+                a = static_cast<uint8_t>(a | 0x80u);
+            u32 pixel = pack32(r, g, b, a);
+            if (ctx.frame.fbmsk != 0)
+                pixel = (pixel & ~ctx.frame.fbmsk) | (fbrgba & ctx.frame.fbmsk);
+            if (preserveDestinationAlpha)
+                pixel = (pixel & 0x00FFFFFFu) | (fbrgba & 0xFF000000u);
+            uint8_t *framePixel = m_vram + frameOff[i];
+            if (pipe.undo)
+                RecordUndo(pipe, framePixel, x, y);
+            writeTarget(fpsm, framePixel, pixel);
+        }
+        if (writeDepth && !ctx.zbuf.zmask)
+        {
+            uint8_t *depthPixel = m_vram + depthOff[i];
+            if (pipe.undo)
+                RecordUndo(pipe, depthPixel, x, y);
+            writeTarget(zpsm, depthPixel, static_cast<uint32_t>(z));
+        }
+        ++written;
+    }
+    return written;
 }
 
 GSCpuBackend::PixelPipeline GSCpuBackend::MakePixelPipeline(const GSDrawState &state, const RasterContext &raster)
@@ -3218,6 +3428,13 @@ void GSCpuBackend::DrawTriangle(const GSPrimitiveBatch &batch, const RasterConte
                     texels[i] = SampleTextureAxes(sampler, axesU[i], axesV[i]);
                     raster.sampled(y, xs[i]);
                 }
+                auto writeChunk = [&](auto frameFormat, auto depthFormat)
+                {
+                constexpr uint32_t kFrame = decltype(frameFormat)::value;
+                constexpr uint32_t kDepth = decltype(depthFormat)::value;
+                constexpr bool staged = kFrame != kAnyTarget && kDepth != kAnyTarget;
+                SpanPixels span;
+                span.count = 0;
                 for (int i = 0; i < count; ++i)
                 {
                     const float w0 = w0s[i], w1 = w1s[i], w2 = w2s[i];
@@ -3242,8 +3459,27 @@ void GSCpuBackend::DrawTriangle(const GSPrimitiveBatch &batch, const RasterConte
                                                                       static_cast<uint8_t>(texel & 0xFF), static_cast<uint8_t>((texel >> 8) & 0xFF),
                                                                       static_cast<uint8_t>((texel >> 16) & 0xFF), static_cast<uint8_t>((texel >> 24) & 0xFF));
                     const uint8_t fog = clampU8(static_cast<int>(v0.fog * w0 + v1.fog * w1 + v2.fog * w2));
-                    writtenPixels += WritePixel(pipe, xs[i], y, static_cast<u32>(z + 0.5), color.r, color.g, color.b, color.a, fog) ? 1u : 0u;
+                    if constexpr (staged)
+                    {
+                        const int k = span.count++;
+                        span.x[k] = xs[i];
+                        span.z[k] = static_cast<int>(static_cast<u32>(z + 0.5));
+                        span.r[k] = color.r;
+                        span.g[k] = color.g;
+                        span.b[k] = color.b;
+                        span.a[k] = color.a;
+                        span.fog[k] = fog;
+                    }
+                    else
+                    {
+                        writtenPixels += WritePixelFor<kFrame, kDepth>(pipe, xs[i], y, static_cast<u32>(z + 0.5), color.r, color.g, color.b,
+                                                                       color.a, fog) ? 1u : 0u;
+                    }
                 }
+                if constexpr (staged)
+                    writtenPixels += WriteSpanFor<kFrame, kDepth>(pipe, y, span);
+                };
+                dispatchTargetFormats(pipe.fpsm, pipe.zpsm, writeChunk);
             }
             continue;
         }

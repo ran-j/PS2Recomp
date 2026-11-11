@@ -253,6 +253,26 @@ private:
     void WritePixel(const GSDrawState &state, int x, int y, int z, uint8_t r, uint8_t g, uint8_t b, uint8_t a, uint8_t fog);
     // True when the pixel passed every test and something was stored.
     bool WritePixel(const PixelPipeline &pipe, int x, int y, int z, uint8_t r, uint8_t g, uint8_t b, uint8_t a, uint8_t fog);
+    // WritePixel for colour and depth formats fixed at compile time; kAnyTarget reads them from the pipeline.
+    static constexpr uint32_t kAnyTarget = 0xFFu;
+    template <uint32_t FramePsm, uint32_t DepthPsm>
+    bool WritePixelFor(const PixelPipeline &pipe, int x, int y, int z, uint8_t r, uint8_t g, uint8_t b, uint8_t a, uint8_t fog);
+    // Pixels of one row of a batched primitive, as WritePixelFor writes them one by one; returns how many
+    // were stored.
+    struct SpanPixels
+    {
+        static constexpr int kMax = 32;
+        int count = 0;
+        int x[kMax];
+        int z[kMax];
+        uint8_t r[kMax];
+        uint8_t g[kMax];
+        uint8_t b[kMax];
+        uint8_t a[kMax];
+        uint8_t fog[kMax];
+    };
+    template <uint32_t FramePsm, uint32_t DepthPsm>
+    uint32_t WriteSpanFor(const PixelPipeline &pipe, int y, SpanPixels &span);
     // Texture registers decoded once per primitive, with the CLUT expanded to RGBA for indexed formats.
     struct TextureSampler
     {
