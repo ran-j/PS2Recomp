@@ -836,69 +836,25 @@ namespace ps2_stubs
 
     void sceGsResetGraph(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        uint32_t mode = getRegU32(ctx, 4);
-        uint32_t interlace = getRegU32(ctx, 5);
-        uint32_t omode = getRegU32(ctx, 6);
-        uint32_t ffmode = getRegU32(ctx, 7);
+        // libgraph: mode 1 only flushes the GS; modes 0 (after a GS reset) and 5 record the CRT parameters
+        // and tail-call SetGsCrt. PMODE/DISPFB/DISPLAY are left to the display env the game puts later.
+        const int16_t mode = static_cast<int16_t>(getRegU32(ctx, 4));
+        const int16_t interlace = static_cast<int16_t>(getRegU32(ctx, 5));
+        const int16_t omode = static_cast<int16_t>(getRegU32(ctx, 6));
+        const int16_t ffmode = static_cast<int16_t>(getRegU32(ctx, 7));
 
-        if (mode == 0)
+        if (mode == 0 || mode == 5)
         {
-            if (runtime && !runtime->syncCoreSubsystems())
-            {
-                setReturnS32(ctx, -1);
-                return;
-            }
-
-            g_gparam.interlace = static_cast<uint8_t>(interlace & 0x1);
-            g_gparam.omode = static_cast<uint8_t>(omode & 0xFF);
-            g_gparam.ffmode = static_cast<uint8_t>(ffmode & 0x1);
+            g_gparam.interlace = static_cast<uint8_t>(interlace);
+            g_gparam.omode = static_cast<uint8_t>(omode);
+            g_gparam.ffmode = ffmode != 0 ? 1u : 0u;
             writeGsGParamToScratch(runtime);
-            uint64_t pmode = makePmode(1, 0, 0, 0, 0, 0x80);
-            uint64_t smode2 = (interlace & 0x1) | ((ffmode & 0x1) << 1);
-            uint64_t dispfb = makeDispFb(0, 10, 0, 0, 0);
-            uint64_t display = makeDisplay(0, 0, 0, 0, 639, 447);
-            uint64_t bgcolor = 0ULL;
 
-            if (runtime)
-            {
-                uint32_t pktAddr = runtime->guestMalloc(128u, 16u);
-                if (pktAddr != 0u)
-                {
-                    uint8_t *pkt = getMemPtr(rdram, pktAddr);
-                    if (pkt)
-                    {
-                        uint64_t *q = reinterpret_cast<uint64_t *>(pkt);
-                        q[0] = makeGiftagAplusD(7u);
-                        q[1] = 0xEULL;
-                        q[2] = pmode;
-                        q[3] = 0x41ULL;
-                        q[4] = smode2;
-                        q[5] = 0x42ULL;
-                        q[6] = dispfb;
-                        q[7] = 0x59ULL;
-                        q[8] = display;
-                        q[9] = 0x5aULL;
-                        q[10] = dispfb;
-                        q[11] = 0x5bULL;
-                        q[12] = display;
-                        q[13] = 0x5cULL;
-                        q[14] = bgcolor;
-                        q[15] = 0x5fULL;
-                        constexpr uint32_t GIF_CHANNEL = 0x1000A000;
-                        constexpr uint32_t CHCR_STR_MODE0 = 0x101u;
-                        auto &mem = runtime->memory();
-                        mem.writeIORegister(GIF_CHANNEL + 0x10u, pktAddr);
-                        mem.writeIORegister(GIF_CHANNEL + 0x20u, 8u);
-                        mem.writeIORegister(GIF_CHANNEL + 0x00u, CHCR_STR_MODE0);
-                        mem.processPendingTransfers();
-                        runtime->guestFree(pktAddr);
-                    }
-                    else
-                    {
-                        runtime->guestFree(pktAddr);
-                    }
-                }
-            }
+            R5900Context crt{};
+            SET_GPR_U32(&crt, 4, static_cast<uint32_t>(interlace & 1));
+            SET_GPR_U32(&crt, 5, static_cast<uint32_t>(omode & 0xFF));
+            SET_GPR_U32(&crt, 6, static_cast<uint32_t>(ffmode & 1));
+            ps2_syscalls::GsSetCrt(rdram, &crt, runtime);
         }
 
         setReturnS32(ctx, 0);

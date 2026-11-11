@@ -5711,6 +5711,36 @@ void register_ps2_gs_tests()
                                     "sceGsResetGraph should free its temporary GIF packet");
         });
 
+        tc.Run("sceGsResetGraph sets the CRT through SetGsCrt and honours mode 5", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            auto &gs = runtime.memory().gs();
+            gs.smode2 = 0u;
+            gs.display2 = 0x1234ull;
+
+            resetGraphForTest(rdram, runtime, 1u, 0u);
+            t.Equals(gs.smode2, 1ull, "ResetGraph(0, interlace, NTSC, field) should program SMODE2 like SetGsCrt");
+            t.Equals(gs.display2, 0x1234ull, "ResetGraph should not invent a DISPLAY; the display env sets it");
+
+            // Mode 5 changes the CRT parameters without a reset; libgraph's zbuf placement follows them.
+            R5900Context ctx{};
+            setRegU32(ctx, 4, 5u);
+            setRegU32(ctx, 5, 0u);
+            setRegU32(ctx, 6, 2u);
+            setRegU32(ctx, 7, 0u);
+            ps2_stubs::sceGsResetGraph(rdram.data(), &ctx, &runtime);
+            R5900Context zctx{};
+            setRegU32(zctx, 4, GS_PSM_CT32);
+            setRegU32(zctx, 5, 640u);
+            setRegU32(zctx, 6, 448u);
+            ps2_stubs::sceGszbufaddr(rdram.data(), &zctx, &runtime);
+            t.Equals(getRegU32Test(zctx, 2), 280u, "mode 5 should switch libgraph to progressive (two buffers)");
+            t.Equals(gs.smode2, 0ull, "mode 5 should reprogram SMODE2 too");
+            resetGraphForTest(rdram, runtime, 1u, 1u);
+        });
+
         tc.Run("sceGsSyncV resumes through the scheduler with deterministic field parity", [](TestCase &t)
         {
             PS2Runtime runtime;
