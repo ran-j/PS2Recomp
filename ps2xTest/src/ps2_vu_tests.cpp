@@ -948,7 +948,7 @@ void register_ps2_vu_tests()
         tc.Run("ClipScreen_inside_zero", [](TestCase &t)
         {
             VuEnv env;
-            writeVec4(env, kA, 100.0f, 100.0f, 0.0f, 0.0f);
+            writeVec4(env, kA, 100.0f, 100.0f, 0.0f, 1.0f);
             SET_GPR_U32(&env.ctx, 4, kA);
             ps2_stubs::sceVu0ClipScreen(env.rdram.data(), &env.ctx, &env.runtime);
             t.Equals(getRegU32(&env.ctx, 2), 0u, "ClipScreen should return 0 for an in-bounds vertex");
@@ -957,22 +957,33 @@ void register_ps2_vu_tests()
         tc.Run("ClipScreen_offscreen_nonzero", [](TestCase &t)
         {
             VuEnv env;
-            writeVec4(env, kA, 5000.0f, 100.0f, 0.0f, 0.0f);
+            writeVec4(env, kA, 5000.0f, 100.0f, 0.0f, 1.0f);
             SET_GPR_U32(&env.ctx, 4, kA);
             ps2_stubs::sceVu0ClipScreen(env.rdram.data(), &env.ctx, &env.runtime);
-            t.IsTrue(getRegU32(&env.ctx, 2) != 0u, "ClipScreen should return nonzero when x exceeds the guard band");
+            t.Equals(getRegU32(&env.ctx, 2), 0x80u, "ClipScreen should report the sticky sign flag when x exceeds 4096");
         });
 
         tc.Run("ClipScreen_negx_nonzero", [](TestCase &t)
         {
-            // Pins the negative-x guard-band clause (v[0] < -kScreenClipGuard => 0x2),
-            // the mirror of ClipScreen_offscreen_nonzero's +x clause. Without this
-            // case, deleting the negative-x clause leaves the suite green.
+            // libvu0 tests x against 0, not a negative guard band: any negative x is offscreen.
             VuEnv env;
-            writeVec4(env, kA, -5000.0f, 100.0f, 0.0f, 0.0f);
+            writeVec4(env, kA, -100.0f, 100.0f, 0.0f, 1.0f);
             SET_GPR_U32(&env.ctx, 4, kA);
             ps2_stubs::sceVu0ClipScreen(env.rdram.data(), &env.ctx, &env.runtime);
-            t.IsTrue(getRegU32(&env.ctx, 2) != 0u, "ClipScreen should return nonzero when x is below the negative guard band");
+            t.Equals(getRegU32(&env.ctx, 2), 0x80u, "ClipScreen should flag a vertex left of x=0");
+        });
+
+        tc.Run("ClipScreen_w_and_edges", [](TestCase &t)
+        {
+            VuEnv env;
+            writeVec4(env, kA, 100.0f, 100.0f, 0.0f, -1.0f);
+            SET_GPR_U32(&env.ctx, 4, kA);
+            ps2_stubs::sceVu0ClipScreen(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegU32(&env.ctx, 2), 0x80u, "a vertex behind the eye (w < 0) is offscreen");
+
+            writeVec4(env, kA, 4096.0f, 100.0f, 0.0f, 1.0f);
+            ps2_stubs::sceVu0ClipScreen(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegU32(&env.ctx, 2), 0x40u, "x exactly on the 4096 edge sets the sticky zero flag");
         });
 
         tc.Run("ClipScreen3_ors_three", [](TestCase &t)
@@ -980,14 +991,14 @@ void register_ps2_vu_tests()
             // Both offscreen vertices trip the y-guard clauses (not x) so this
             // test does not overlap ClipScreen_offscreen_nonzero's x-guard mutation.
             VuEnv env;
-            writeVec4(env, kA, 0.0f, 5000.0f, 0.0f, 0.0f);
-            writeVec4(env, kB, 0.0f, 0.0f, 0.0f, 0.0f);
-            writeVec4(env, kC, 0.0f, -5000.0f, 0.0f, 0.0f);
+            writeVec4(env, kA, 10.0f, 5000.0f, 0.0f, 1.0f);
+            writeVec4(env, kB, 10.0f, 10.0f, 0.0f, 0.0f);
+            writeVec4(env, kC, 10.0f, 10.0f, 0.0f, 1.0f);
             SET_GPR_U32(&env.ctx, 4, kA);
             SET_GPR_U32(&env.ctx, 5, kB);
             SET_GPR_U32(&env.ctx, 6, kC);
             ps2_stubs::sceVu0ClipScreen3(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegU32(&env.ctx, 2), 0xCu, "ClipScreen3 should OR the guard-band codes across all 3 vertices");
+            t.Equals(getRegU32(&env.ctx, 2), 0xC0u, "ClipScreen3 should OR the sticky flags of all 3 vertices (y>4096 sign, w=0 zero)");
         });
 
         tc.Run("ClipAll_all_out_returns_1", [](TestCase &t)
@@ -996,7 +1007,7 @@ void register_ps2_vu_tests()
             float ident[16]{};
             makeIdentity(ident);
             writeVec4(env, kA, -1.0f, -1.0f, 0.0f, 0.0f); // lo
-            writeVec4(env, kB, 1.0f, 1.0f, 0.0f, 0.0f);   // hi
+            writeVec4(env, kB, 1.0f, 1.0f, 0.0f, 10.0f);  // hi (w = far bound)
             writeMat4(env, kC, ident);
             writeVec4(env, kArr, 5.0f, 5.0f, 0.0f, 1.0f);
             writeVec4(env, kArr + 16u, -5.0f, -5.0f, 0.0f, 1.0f);
@@ -1015,7 +1026,7 @@ void register_ps2_vu_tests()
             float ident[16]{};
             makeIdentity(ident);
             writeVec4(env, kA, -1.0f, -1.0f, 0.0f, 0.0f); // lo
-            writeVec4(env, kB, 1.0f, 1.0f, 0.0f, 0.0f);   // hi
+            writeVec4(env, kB, 1.0f, 1.0f, 0.0f, 10.0f);  // hi (w = far bound)
             writeMat4(env, kC, ident);
             writeVec4(env, kArr, 5.0f, 5.0f, 0.0f, 1.0f);
             writeVec4(env, kArr + 16u, 0.0f, 0.0f, 0.0f, 1.0f);
@@ -1034,7 +1045,7 @@ void register_ps2_vu_tests()
             float ident[16]{};
             makeIdentity(ident);
             writeVec4(env, kA, -1.0f, -1.0f, 0.0f, 0.0f); // lo
-            writeVec4(env, kB, 1.0f, 1.0f, 0.0f, 0.0f);   // hi
+            writeVec4(env, kB, 1.0f, 1.0f, 0.0f, 10.0f);  // hi (w = far bound)
             writeMat4(env, kC, ident);
             // Vertex x=2 sits OUTSIDE the raw [-1,1] band but INSIDE the
             // homogeneous band [-w,w] = [-4,4] once scaled by w=4. With the
@@ -1049,6 +1060,25 @@ void register_ps2_vu_tests()
             ps2_stubs::sceVu0ClipAll(env.rdram.data(), &env.ctx, &env.runtime);
             t.Equals(static_cast<int32_t>(getRegU32(&env.ctx, 2)), 0,
                      "ClipAll must scale the lo/hi bounds by the vertex w (homogeneous guard planes)");
+        });
+
+        tc.Run("ClipAll_w_outside_far_bound_returns_1", [](TestCase &t)
+        {
+            // libvu0 also VSUBs w against lo.w/hi.w, so a vertex centred on screen but past hi.w is culled.
+            VuEnv env;
+            float ident[16]{};
+            makeIdentity(ident);
+            writeVec4(env, kA, -1.0f, -1.0f, 0.0f, 0.0f);
+            writeVec4(env, kB, 1.0f, 1.0f, 0.0f, 10.0f);
+            writeMat4(env, kC, ident);
+            writeVec4(env, kArr, 0.0f, 0.0f, 0.0f, 20.0f);
+            SET_GPR_U32(&env.ctx, 4, kA);
+            SET_GPR_U32(&env.ctx, 5, kB);
+            SET_GPR_U32(&env.ctx, 6, kC);
+            SET_GPR_U32(&env.ctx, 7, kArr);
+            SET_GPR_U32(&env.ctx, 8, 1u);
+            ps2_stubs::sceVu0ClipAll(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(static_cast<int32_t>(getRegU32(&env.ctx, 2)), 1, "w beyond hi.w should count as outside");
         });
 
         tc.Run("ViewScreenMatrix_zscale", [](TestCase &t)

@@ -168,21 +168,28 @@ namespace ps2_stubs
             out[3] = fullFtoi4 ? static_cast<int32_t>(t[3] * 16.0f) : static_cast<int32_t>(t[3]);
         }
 
-        // Guard-band proxy for the COP2 sticky clip flags: nonzero => the
-        // vertex is offscreen. Not the hardware per-plane flag layout.
-        constexpr float kScreenClipGuard = 4096.0f;
+        // libvu0's clip tests VSUB the bounds from the vertex and return the VU0 status flags masked to the
+        // sticky sign (0x80) and zero (0x40) bits, so a vertex counts as inside only when every difference
+        // is strictly positive.
+        constexpr uint32_t kVuStickySign = 0x80u;
+        constexpr uint32_t kVuStickyZero = 0x40u;
+        uint32_t vuStickyFlags(float difference)
+        {
+            uint32_t flags = 0u;
+            if (std::signbit(difference))
+                flags |= kVuStickySign;
+            if (difference == 0.0f)
+                flags |= kVuStickyZero;
+            return flags;
+        }
+
+        // sceVu0ClipScreen: x and y must lie in (0, 4096) and w must be positive.
+        constexpr float kScreenClipLimit = 4096.0f;
         int32_t screenClipCode(const float (&v)[4])
         {
-            int32_t code = 0;
-            if (v[0] > kScreenClipGuard)
-                code |= 0x1;
-            if (v[0] < -kScreenClipGuard)
-                code |= 0x2;
-            if (v[1] > kScreenClipGuard)
-                code |= 0x4;
-            if (v[1] < -kScreenClipGuard)
-                code |= 0x8;
-            return code;
+            const uint32_t flags = vuStickyFlags(v[0]) | vuStickyFlags(v[1]) | vuStickyFlags(v[3]) |
+                                   vuStickyFlags(kScreenClipLimit - v[0]) | vuStickyFlags(kScreenClipLimit - v[1]);
+            return static_cast<int32_t>(flags);
         }
     }
 
@@ -321,9 +328,11 @@ namespace ps2_stubs
                 const float tx = (m[0] * v[0]) + (m[4] * v[1]) + (m[8] * v[2]) + (m[12] * v[3]);
                 const float ty = (m[1] * v[0]) + (m[5] * v[1]) + (m[9] * v[2]) + (m[13] * v[3]);
                 const float tw = (m[3] * v[0]) + (m[7] * v[1]) + (m[11] * v[2]) + (m[15] * v[3]);
-                const bool outsideX = (tx < lo[0] * tw) || (tx > hi[0] * tw);
-                const bool outsideY = (ty < lo[1] * tw) || (ty > hi[1] * tw);
-                if (!outsideX && !outsideY)
+                // x/y bounds scale with w; w itself is checked against the raw lo.w/hi.w (near/far).
+                const uint32_t flags = vuStickyFlags(tx - (lo[0] * tw)) | vuStickyFlags(ty - (lo[1] * tw)) |
+                                       vuStickyFlags(tw - lo[3]) | vuStickyFlags((hi[0] * tw) - tx) |
+                                       vuStickyFlags((hi[1] * tw) - ty) | vuStickyFlags(hi[3] - tw);
+                if (flags == 0u)
                 {
                     result = 0;
                     break;
