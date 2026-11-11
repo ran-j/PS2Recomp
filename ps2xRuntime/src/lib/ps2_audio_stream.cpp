@@ -3,16 +3,19 @@
 #include "ps2_host_backend.h"
 
 #include <algorithm>
+#include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
-Spu2FrameRing::Spu2FrameRing(size_t capacityFrames, size_t prebufferFrames, size_t maxLatencyFrames)
+Spu2FrameRing::Spu2FrameRing(size_t capacityFrames, size_t prebufferFrames, size_t maxLatencyFrames, size_t targetLatencyFrames)
     : m_samples((capacityFrames + 1u) * 2u),
       m_capacity(capacityFrames + 1u),
       m_prebuffer(std::min(prebufferFrames, capacityFrames)),
-      m_maxLatency(std::min(maxLatencyFrames, capacityFrames))
+      m_maxLatency(std::min(maxLatencyFrames, capacityFrames)),
+      m_targetLatency(std::min(targetLatencyFrames, capacityFrames))
 {
 }
 
@@ -60,32 +63,64 @@ size_t Spu2FrameRing::pop(int16_t *out, size_t frames)
         queued = m_maxLatency;
     }
 
-    const size_t count = std::min(frames, queued);
-    for (size_t i = 0; i < count;)
+    // Playback rate: 1.0 within 10% of the target, otherwise up to 5% faster (queue long) or slower
+    // (queue short). The rate only moves with the fill level, so steady producers converge quietly.
+    double ratio = 1.0;
+    if (m_targetLatency != 0u)
     {
-        const size_t index = (read + i) % m_capacity;
-        const size_t run = std::min(count - i, m_capacity - index);
-        std::memcpy(out + i * 2u, &m_samples[index * 2u], run * 2u * sizeof(int16_t));
-        i += run;
+        constexpr double kDeadBand = 0.1;
+        constexpr double kMaxDeviation = 0.05;
+        const double deviation = (static_cast<double>(queued) - static_cast<double>(m_targetLatency)) /
+                                 static_cast<double>(m_targetLatency);
+        if (deviation > kDeadBand || deviation < -kDeadBand)
+            ratio = 1.0 + std::clamp(deviation, -1.0, 1.0) * kMaxDeviation;
     }
-    m_readIndex.store((read + count) % m_capacity, std::memory_order_release);
 
-    if (count < frames)
+    size_t produced = 0u;
+    double phase = (ratio == 1.0) ? 0.0 : m_phase;
+    while (produced < frames)
     {
-        std::memset(out + count * 2u, 0, (frames - count) * 2u * sizeof(int16_t));
+        const size_t base = static_cast<size_t>(phase);
+        const double frac = phase - static_cast<double>(base);
+        if (base >= queued || (frac > 0.0 && base + 1u >= queued))
+            break;
+        const size_t index0 = (read + base) % m_capacity;
+        const size_t index1 = (read + base + 1u) % m_capacity;
+        for (size_t channel = 0; channel < 2u; ++channel)
+        {
+            const int16_t s0 = m_samples[index0 * 2u + channel];
+            const int16_t s1 = (frac > 0.0) ? m_samples[index1 * 2u + channel] : s0;
+            out[produced * 2u + channel] = static_cast<int16_t>(std::lrint(s0 + (s1 - s0) * frac));
+        }
+        ++produced;
+        phase += ratio;
+    }
+    size_t consumed = static_cast<size_t>(phase);
+    if (consumed > queued)
+        consumed = queued;
+    m_phase = (ratio == 1.0) ? 0.0 : phase - static_cast<double>(consumed);
+    m_readIndex.store((read + consumed) % m_capacity, std::memory_order_release);
+
+    if (produced < frames)
+    {
+        std::memset(out + produced * 2u, 0, (frames - produced) * 2u * sizeof(int16_t));
         m_starving = true;
+        m_phase = 0.0;
         m_underruns.fetch_add(1u, std::memory_order_relaxed);
     }
-    return count;
+    return produced;
 }
 
 namespace
 {
     constexpr unsigned int kSpu2SampleRate = 48000u;
-    // 250 ms of headroom, 40 ms to (re)start, and never more than 150 ms behind the game.
+    // 250 ms of headroom, 40 ms to (re)start, playback rate held around 100 ms of queue, and never more
+    // than 200 ms behind the game. A 5% rate swing covers the few percent the IOP's emulated 48 kHz
+    // drifts from the device (fast at the title, slow when the EE misses vblanks) without cutting audio.
     constexpr size_t kRingFrames = kSpu2SampleRate / 4u;
     constexpr size_t kPrebufferFrames = kSpu2SampleRate / 25u;
-    constexpr size_t kMaxLatencyFrames = kSpu2SampleRate * 3u / 20u;
+    constexpr size_t kTargetLatencyFrames = kSpu2SampleRate / 10u;
+    constexpr size_t kMaxLatencyFrames = kSpu2SampleRate / 5u;
 
     // raylib audio callbacks carry no user pointer.
     std::atomic<Spu2FrameRing *> g_activeRing{nullptr};
@@ -104,6 +139,16 @@ namespace
 #endif
 }
 
+namespace
+{
+    std::atomic<uint64_t> g_pushedFrames{0};
+}
+
+uint64_t spu2AudioPushedFrames()
+{
+    return g_pushedFrames.load(std::memory_order_relaxed);
+}
+
 uint64_t spu2AudioUnderruns()
 {
     const Spu2FrameRing *ring = g_activeRing.load(std::memory_order_acquire);
@@ -118,7 +163,7 @@ uint64_t spu2AudioLatencyDroppedFrames()
 
 struct Spu2AudioOutput::Impl
 {
-    Spu2FrameRing ring{kRingFrames, kPrebufferFrames, kMaxLatencyFrames};
+    Spu2FrameRing ring{kRingFrames, kPrebufferFrames, kMaxLatencyFrames, kTargetLatencyFrames};
     bool started = false;
     bool unavailable = false;
 #if !defined(PLATFORM_VITA)
@@ -237,5 +282,8 @@ void Spu2AudioOutput::submit(const int16_t *samples, size_t frames)
     if (!m_impl->started && !m_impl->unavailable)
         m_impl->start();
     if (m_impl->started)
+    {
+        g_pushedFrames.fetch_add(frames, std::memory_order_relaxed);
         m_impl->ring.push(samples, frames);
+    }
 }

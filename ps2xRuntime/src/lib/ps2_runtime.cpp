@@ -408,6 +408,7 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
             static uint32_t s_hostFrames = 0u;
             static uint64_t s_lastUnderruns = 0u;
             static uint64_t s_lastAudioDrops = 0u;
+            static uint64_t s_lastPushed = 0u;
             ++s_hostFrames;
             const auto now = std::chrono::steady_clock::now();
             const double elapsed = std::chrono::duration<double>(now - s_lastReport).count();
@@ -415,8 +416,9 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
             {
                 const uint64_t underruns = spu2AudioUnderruns();
                 const uint64_t audioDrops = spu2AudioLatencyDroppedFrames();
+                const uint64_t pushed = spu2AudioPushedFrames();
                 std::fprintf(stderr,
-                             "[perf] vsync=%llu guest_vps=%.1f host_fps=%.1f black_frames=%u last_black(tick=%llu dispfbp=0x%x srcfbp=0x%x) audio_underruns=+%llu audio_dropped_frames=+%llu\n",
+                             "[perf] vsync=%llu guest_vps=%.1f host_fps=%.1f black_frames=%u last_black(tick=%llu dispfbp=0x%x srcfbp=0x%x) audio_rate=%.0f audio_underruns=+%llu audio_dropped_frames=+%llu\n",
                              static_cast<unsigned long long>(currentTick),
                              static_cast<double>(currentTick - s_lastTick) / elapsed,
                              static_cast<double>(s_hostFrames) / elapsed,
@@ -424,6 +426,7 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
                              static_cast<unsigned long long>(s_lastBlackTick),
                              s_lastBlackDisplayFbp,
                              s_lastBlackSourceFbp,
+                             static_cast<double>(pushed - s_lastPushed) / elapsed,
                              static_cast<unsigned long long>(underruns - s_lastUnderruns),
                              static_cast<unsigned long long>(audioDrops - s_lastAudioDrops));
                 s_lastReport = now;
@@ -432,6 +435,7 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
                 s_blackFrames = 0u;
                 s_lastUnderruns = underruns;
                 s_lastAudioDrops = audioDrops;
+                s_lastPushed = pushed;
             }
         }
     }

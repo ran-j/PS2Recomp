@@ -56,6 +56,29 @@ void register_ps2_audio_stream_tests()
             t.Equals(ring.pop(out.data(), 2u), size_t{0}, "a trickle after an underrun must wait for the prebuffer");
         });
 
+        tc.Run("a queue far above its target plays faster, far below it slower, and near it unchanged", [](TestCase &t)
+        {
+            Spu2FrameRing ring(4096u, 8u, 4096u, 64u);
+            const std::vector<int16_t> frames = rampFrames(256u, 0);
+            ring.push(frames.data(), 256u);
+            std::vector<int16_t> out(200u);
+            t.Equals(ring.pop(out.data(), 100u), size_t{100}, "the callback is always filled");
+            const size_t afterFast = ring.available();
+            t.IsTrue(afterFast >= 150u && afterFast <= 152u, "a queue four times the target is consumed 5% faster than it plays");
+            t.IsTrue(out[0] == 0 && out[2] > out[0] && out[198] > out[2], "faster playback keeps the ramp monotonic");
+
+            Spu2FrameRing low(4096u, 8u, 4096u, 64u);
+            low.push(frames.data(), 40u);
+            t.Equals(low.pop(out.data(), 32u), size_t{32}, "the callback is filled from a short queue");
+            t.Equals(low.available(), size_t{9}, "a queue below the target is stretched: 32 frames out, 31 consumed");
+
+            Spu2FrameRing near(4096u, 8u, 4096u, 64u);
+            near.push(frames.data(), 66u);
+            t.Equals(near.pop(out.data(), 16u), size_t{16}, "playback starts");
+            t.Equals(out[30], int16_t{15}, "within the dead band samples pass through untouched");
+            t.Equals(near.available(), size_t{50}, "within the dead band one frame is consumed per frame played");
+        });
+
         tc.Run("a full ring drops new frames and a long queue is trimmed to the latency cap", [](TestCase &t)
         {
             Spu2FrameRing ring(16u, 1u, 8u);
