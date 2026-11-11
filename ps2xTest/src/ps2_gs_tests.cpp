@@ -4032,6 +4032,65 @@ void register_ps2_gs_tests()
             t.Equals(static_cast<uint32_t>(after.pixels[0]), 0x00u, "once drained, presentation should show live memory");
         });
 
+        tc.Run("GS thread presentation prefers the capture taken at the requested vblank even when drained", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GSRegisters regs{};
+            regs.pmode = 0x1ull;
+            regs.dispfb1 = 10ull << 9u;
+            regs.display1 = (639ull << 32u) | (447ull << 44u);
+
+            GSCpuBackend gs;
+            gs.Initialize(vram.data(), static_cast<uint32_t>(vram.size()));
+            gs.SetAsync(true);
+            gs.SetDisplayRegisters(&regs);
+
+            auto sprite = [&gs](uint32_t fbp, uint8_t r)
+            {
+                GSPrimitiveBatch batch{};
+                batch.state.prim.type = GS_PRIM_SPRITE;
+                batch.state.context.frame.fbp = fbp;
+                batch.state.context.frame.fbw = 10u;
+                batch.state.context.frame.psm = GS_PSM_CT32;
+                batch.state.context.scissor = {0u, 639u, 0u, 447u};
+                batch.state.context.zbuf.zmask = 1u;
+                batch.state.context.test = (1ull << 17u) | (1ull << 16u);
+                batch.vertexCount = 2u;
+                batch.vertices[0].x = 0.0f;
+                batch.vertices[0].y = 0.0f;
+                batch.vertices[1].x = 640.0f;
+                batch.vertices[1].y = 448.0f;
+                for (GSVertex &vertex : batch.vertices)
+                {
+                    vertex.r = r;
+                    vertex.a = 0x80u;
+                }
+                gs.Submit(batch);
+            };
+
+            // Frame drawn before the vblank, then the game clears the still-displayed buffer right after it.
+            sprite(0u, 0xFFu);
+            regs.vsyncTick.store(1u);
+            sprite(0u, 0x00u);
+            std::vector<uint8_t> settled;
+            gs.SnapshotVram(settled);
+
+            GSPresentationRequest request{};
+            request.pmode = regs.pmode;
+            request.dispfb1 = regs.dispfb1;
+            request.display1 = regs.display1;
+            request.vsyncTick = 1u;
+            const PresentationFrame atVblank = gs.Present(request);
+            t.IsTrue(!atVblank.pixels.empty(), "presentation should produce a frame");
+            t.Equals(static_cast<uint32_t>(atVblank.pixels[0]), 0xFFu,
+                     "the capture taken at the requested vblank must win over memory the game already cleared");
+
+            request.vsyncTick = 2u;
+            const PresentationFrame later = gs.Present(request);
+            t.Equals(static_cast<uint32_t>(later.pixels[0]), 0x00u,
+                     "a tick with no capture yet and a drained queue presents live memory");
+        });
+
         tc.Run("GS texture page buffer also hides draws into the cached page until TEXFLUSH", [](TestCase &t)
         {
             std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);

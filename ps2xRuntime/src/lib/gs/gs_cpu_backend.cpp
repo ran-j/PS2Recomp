@@ -4200,11 +4200,16 @@ PresentationFrame GSCpuBackend::Present(const GSPresentationRequest &request)
         behind = m_queueCompleted < m_queueSubmitted;
     }
     bool captured = false;
-    if (behind)
     {
-        // Live memory would pair the guest's current DISPFB with a buffer still being drawn.
+        // The capture taken at this vblank pairs the display registers with the memory the game had
+        // finished drawing by then. Live memory races the EE: between building the request and copying
+        // VRAM, the game can clear the buffer DISPFB still names (it clears the next draw buffer before
+        // moving DISPFB off it), which showed as a black frame every few seconds in Mana Khemia's maps.
+        // Only when nothing was queued since the vblank is live memory still the vblank state, unless
+        // the GS thread is behind, in which case the previous capture is the newest consistent frame.
         std::lock_guard<std::mutex> lock(m_captureMutex);
-        if (!m_capturedVram.empty())
+        const bool captureIsCurrent = !m_capturedVram.empty() && m_capturedDisplay.vsyncTick == request.vsyncTick;
+        if (!m_capturedVram.empty() && (captureIsCurrent || behind))
         {
             snapshot = m_capturedVram;
             shown.pmode = m_capturedDisplay.pmode;
