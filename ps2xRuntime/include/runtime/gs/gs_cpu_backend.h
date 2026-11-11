@@ -4,9 +4,11 @@
 #include "runtime/gs/gs_texture_page_cache.h"
 
 #include <array>
+#include <atomic>
 #include <bitset>
 #include <condition_variable>
 #include <deque>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -218,9 +220,16 @@ private:
     void DrawPrimitiveRows(const GSPrimitiveBatch &batch, const RasterContext &raster);
     void PrepareTexturePageCache(const GSDrawState &state);
     void QueuePrimitive(const GSPrimitiveBatch &batch);
+    // Rasterizes everything queued and waits for it, so VRAM and the texture cache are current.
     void FlushPendingUnlocked(FlushReason reason = FlushReason::Other);
-    void RasterizePendingInParallel();
-    void RasterizeTrackedInParallel(bool inlineBand);
+    // Hands the queued batch to the raster workers and returns while they draw it, leaving the caller free
+    // to queue the next batch; anything that touches VRAM or the texture cache waits first.
+    void FlushPendingAsyncUnlocked(FlushReason reason);
+    void WaitInFlightUnlocked();
+    void LaunchInFlight(bool tracked, bool inlineBand);
+    void RasterizeInFlightBand(uint32_t index);
+    void FinishTracked();
+    void FinishUntracked();
     void ClearPendingUnlocked();
     uint32_t RasterParticipants() const;
     void DrawSprite(const GSPrimitiveBatch &batch, const RasterContext &raster);
@@ -362,4 +371,25 @@ private:
     std::vector<std::vector<UndoEntry>> m_undoLogs;
     // One texture page cache per band, kept between batches: each holds an 8 KB page copy.
     std::vector<GSMem::TexturePageCache> m_bandCaches;
+    // The batch the workers are drawing, moved out of the pending state so the next one can queue.
+    struct InFlight
+    {
+        bool active = false;
+        bool tracked = false;
+        // Already drawn as one band on the launching thread: nothing to wait for.
+        bool inlineBand = false;
+        std::vector<GSPrimitiveBatch> prims;
+        std::vector<std::array<uint32_t, 256>> cluts;
+        std::vector<int32_t> clutIndex;
+        std::vector<RowRange> primRows;
+        size_t clutReadIndex = 0;
+        uint32_t cachedBefore = UINT32_MAX;
+        std::vector<RowRange> bands;
+        std::bitset<512> kept;
+        std::vector<RasterTrace> traces;
+        std::vector<RasterStats> bandStats;
+        std::atomic<uint32_t> next{0u};
+        std::function<void(uint32_t)> job;
+    };
+    InFlight m_inflight;
 };

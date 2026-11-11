@@ -792,6 +792,27 @@ public:
 
     uint32_t participants() const { return m_participants; }
 
+    // Starts job on the worker threads only; the caller joins it with finish(), which also runs it on the
+    // calling thread so the caller helps with whatever is left instead of waiting.
+    void start(const std::function<void(uint32_t)> *job)
+    {
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_job = job;
+            m_remaining = m_participants - 1u;
+            ++m_generation;
+        }
+        m_start.notify_all();
+    }
+
+    void finish()
+    {
+        (*m_job)(0u);
+        std::unique_lock<std::mutex> lock(m_mutex);
+        m_done.wait(lock, [this]() { return m_remaining == 0u; });
+        m_job = nullptr;
+    }
+
     // Runs band(i) for i in [0, bands), each once, with every participant taking the next band as it
     // finishes one, so a band that was estimated low does not leave the others waiting.
     void runBands(uint32_t bands, const std::function<void(uint32_t)> &band)
@@ -1012,6 +1033,9 @@ void GSCpuBackend::BalanceRows(const RowWeights &weights, uint32_t participants,
 GSCpuBackend::~GSCpuBackend()
 {
     SetAsync(false);
+    // Workers must not outlive the batch they draw, nor the batch the backend that owns it.
+    std::lock_guard<std::mutex> lock(m_mutex);
+    WaitInFlightUnlocked();
 }
 
 void GSCpuBackend::SetRasterThreads(uint32_t participants)
@@ -1114,7 +1138,7 @@ void GSCpuBackend::QueuePrimitive(const GSPrimitiveBatch &batch)
         else if (tracked && !canTrack)
             reason = FlushReason::TrackMismatch;
         if (reason != FlushReason::Count)
-            FlushPendingUnlocked(reason);
+            FlushPendingAsyncUnlocked(reason);
     }
     if (m_pending.empty())
     {
@@ -1173,7 +1197,7 @@ void GSCpuBackend::QueuePrimitive(const GSPrimitiveBatch &batch)
     addRowWeights(m_pendingRowWeights, bounds);
     m_pendingPixels += bounds.area();
     if (m_pending.size() >= kMaxPendingPrimitives || m_pendingPixels >= kMaxPendingPixels)
-        FlushPendingUnlocked(FlushReason::Full);
+        FlushPendingAsyncUnlocked(FlushReason::Full);
 }
 
 void GSCpuBackend::ClearPendingUnlocked()
@@ -1209,6 +1233,37 @@ void GSCpuBackend::AddRasterStats(const RasterStats &stats)
 
 void GSCpuBackend::FlushPendingUnlocked(FlushReason reason)
 {
+    FlushPendingAsyncUnlocked(reason);
+    WaitInFlightUnlocked();
+}
+
+void GSCpuBackend::WaitInFlightUnlocked()
+{
+    if (!m_inflight.active)
+        return;
+    InFlight &f = m_inflight;
+    if (!f.inlineBand)
+    {
+        GSStatTimer timer(f.tracked ? kTimeTracked : kTimeUntracked);
+        m_workers->finish();
+    }
+    f.active = false;
+    for (uint32_t i = 0; i < f.bandStats.size(); ++i)
+    {
+        AddRasterStats(f.bandStats[i]);
+        if (f.tracked)
+            gsStats().undoEntries.fetch_add(m_undoLogs[i].size(), std::memory_order_relaxed);
+    }
+    if (f.tracked)
+        FinishTracked();
+    else
+        FinishUntracked();
+}
+
+void GSCpuBackend::FlushPendingAsyncUnlocked(FlushReason reason)
+{
+    // One batch in flight at a time: the next one may sample what this one draws.
+    WaitInFlightUnlocked();
     if (m_pending.empty())
         return;
     const bool statsEnabled = gsStatsEnabled();
@@ -1248,13 +1303,9 @@ void GSCpuBackend::FlushPendingUnlocked(FlushReason reason)
         stats.batchPixels[kind].fetch_add(m_pendingPixels, std::memory_order_relaxed);
     }
     GSStatTimer timer(kind == 0 ? kTimeTracked : kind == 1 ? kTimeUntracked : kTimeSerialBatch);
-    if (parallel && m_pendingTracked)
+    if (parallel)
     {
-        RasterizeTrackedInParallel(inlineBand);
-    }
-    else if (parallel)
-    {
-        RasterizePendingInParallel();
+        LaunchInFlight(m_pendingTracked, inlineBand);
     }
     else
     {
@@ -1267,65 +1318,104 @@ void GSCpuBackend::FlushPendingUnlocked(FlushReason reason)
     ClearPendingUnlocked();
 }
 
-void GSCpuBackend::RasterizeTrackedInParallel(bool inlineBand)
+void GSCpuBackend::LaunchInFlight(bool tracked, bool inlineBand)
+{
+    InFlight &f = m_inflight;
+    // The page cached before the batch keeps whatever a sequential draw would leave in it: a page about to
+    // be drawn over is snapshotted first, exactly as PrepareTexturePageCache does for the first writer.
+    uint32_t livePage = 0u;
+    if (m_texturePageCache.LivePage(livePage) &&
+        m_pendingWritePages.test((livePage / GSMem::TexturePageCache::kPageSize) % 512u))
+        m_texturePageCache.Snapshot(m_vram);
+    f.cachedBefore = UINT32_MAX;
+    m_texturePageCache.CachedPage(f.cachedBefore);
+
+    if (!inlineBand && (!m_workers || m_workers->participants() != RasterParticipants()))
+        m_workers = std::make_unique<RasterWorkers>(RasterParticipants());
+    const uint32_t bands = inlineBand ? 1u : m_workers->participants() * kBandsPerWorker;
+    BalanceRows(m_pendingRowWeights, bands, f.bands);
+    f.tracked = tracked;
+    f.kept = m_pendingTexturePages & m_pendingWritePages;
+    // Grown only: one-band batches alternate with full ones, and each cache holds an 8 KB page.
+    if (m_bandCaches.size() < bands)
+        m_bandCaches.resize(bands);
+    for (uint32_t i = 0; i < bands; ++i)
+        m_bandCaches[i].ResetForBand(tracked);
+    if (tracked)
+    {
+        if (m_undoLogs.size() < bands)
+            m_undoLogs.resize(bands);
+        for (std::vector<UndoEntry> &log : m_undoLogs)
+            log.clear();
+    }
+    else
+    {
+        f.traces.assign(bands, RasterTrace{});
+    }
+    f.bandStats.assign(gsStatsEnabled() ? bands : 0u, RasterStats{});
+    // The batch leaves the pending state, which the caller refills while the workers draw this one.
+    f.prims.swap(m_pending);
+    f.cluts.swap(m_pendingCluts);
+    f.clutIndex.swap(m_pendingClutIndex);
+    f.primRows.swap(m_pendingRows);
+    f.clutReadIndex = m_pendingClutReadIndex;
+    f.next.store(0u, std::memory_order_relaxed);
+    f.job = [this, bands](uint32_t)
+    {
+        for (uint32_t i = m_inflight.next.fetch_add(1u, std::memory_order_relaxed); i < bands;
+             i = m_inflight.next.fetch_add(1u, std::memory_order_relaxed))
+            RasterizeInFlightBand(i);
+    };
+    f.active = true;
+    f.inlineBand = inlineBand;
+    if (inlineBand)
+        RasterizeInFlightBand(0u);
+    else
+        m_workers->start(&f.job);
+}
+
+void GSCpuBackend::RasterizeInFlightBand(uint32_t index)
+{
+    const InFlight &f = m_inflight;
+    RasterContext raster{};
+    raster.rowBegin = f.bands[index].begin;
+    raster.rowEnd = f.bands[index].end;
+    raster.cache = &m_bandCaches[index];
+    raster.batched = true;
+    if (f.tracked)
+    {
+        raster.trackReads = true;
+        raster.undo = &m_undoLogs[index];
+        raster.undoPages = &f.kept;
+    }
+    else
+    {
+        raster.trace = const_cast<RasterTrace *>(&f.traces[index]);
+    }
+    raster.stats = f.bandStats.empty() ? nullptr : const_cast<RasterStats *>(&f.bandStats[index]);
+    for (size_t i = 0; i < f.prims.size(); ++i)
+    {
+        // Most primitives miss a given band; skipping them here avoids each one's setup per band.
+        if (f.primRows[i].end < raster.rowBegin || f.primRows[i].begin >= raster.rowEnd)
+            continue;
+        raster.primitive = static_cast<uint32_t>(i);
+        const int32_t clutIndex = f.clutIndex[i];
+        raster.clut = clutIndex >= 0 ? f.cluts[static_cast<size_t>(clutIndex)].data() : nullptr;
+        DrawPrimitiveRows(f.prims[i], raster);
+    }
+}
+
+void GSCpuBackend::FinishTracked()
 {
     // Every primitive samples only top bytes of the pages the batch draws into with RGB24/Z24, so every
     // pixel comes out the same drawn in any order. What a serial draw also leaves behind is the texture
     // cache: it copies a drawn-over page when loading it, so the page it ends on can hold words as they
     // were mid-batch.
-    uint32_t livePage = 0u;
-    if (m_texturePageCache.LivePage(livePage) &&
-        m_pendingWritePages.test((livePage / GSMem::TexturePageCache::kPageSize) % 512u))
-        m_texturePageCache.Snapshot(m_vram);
-    uint32_t cachedBefore = UINT32_MAX;
-    m_texturePageCache.CachedPage(cachedBefore);
-
-    if (!inlineBand && (!m_workers || m_workers->participants() != RasterParticipants()))
-        m_workers = std::make_unique<RasterWorkers>(RasterParticipants());
-    const uint32_t bands = inlineBand ? 1u : m_workers->participants() * kBandsPerWorker;
-    std::vector<RowRange> rows;
-    BalanceRows(m_pendingRowWeights, bands, rows);
-    const std::bitset<512> kept = m_pendingTexturePages & m_pendingWritePages;
-    std::vector<GSMem::TexturePageCache> &caches = m_bandCaches;
-    caches.resize(bands);
-    std::vector<RasterStats> bandStats(gsStatsEnabled() ? bands : 0u);
-    m_undoLogs.resize(bands);
-    for (uint32_t i = 0; i < bands; ++i)
-    {
-        caches[i].ResetForBand(true);
-        m_undoLogs[i].clear();
-    }
-    const std::function<void(uint32_t)> band = [&](uint32_t index)
-    {
-        RasterContext raster{};
-        raster.rowBegin = rows[index].begin;
-        raster.rowEnd = rows[index].end;
-        raster.cache = &caches[index];
-        raster.trackReads = true;
-        raster.batched = true;
-        raster.undo = &m_undoLogs[index];
-        raster.undoPages = &kept;
-        raster.stats = bandStats.empty() ? nullptr : &bandStats[index];
-        for (size_t i = 0; i < m_pending.size(); ++i)
-        {
-            raster.primitive = static_cast<uint32_t>(i);
-            const int32_t clutIndex = m_pendingClutIndex[i];
-            raster.clut = clutIndex >= 0 ? m_pendingCluts[static_cast<size_t>(clutIndex)].data() : nullptr;
-            // Most primitives miss a given band; skipping them here avoids each one's setup per band.
-            if (m_pendingRows[i].end < raster.rowBegin || m_pendingRows[i].begin >= raster.rowEnd)
-                continue;
-            DrawPrimitiveRows(m_pending[i], raster);
-        }
-    };
-    if (inlineBand)
-        band(0u);
-    else
-        m_workers->runBands(bands, band);
-    for (uint32_t i = 0; i < bandStats.size(); ++i)
-    {
-        AddRasterStats(bandStats[i]);
-        gsStats().undoEntries.fetch_add(m_undoLogs[i].size(), std::memory_order_relaxed);
-    }
+    const InFlight &f = m_inflight;
+    const std::vector<GSMem::TexturePageCache> &caches = m_bandCaches;
+    const uint32_t bands = static_cast<uint32_t>(f.bands.size());
+    const std::bitset<512> &kept = f.kept;
+    const uint32_t cachedBefore = f.cachedBefore;
 
     // The page of the last texel read in serial order is where the cache ends.
     GSMem::TexturePageCache::ReadPosition lastRead{};
@@ -1342,8 +1432,8 @@ void GSCpuBackend::RasterizeTrackedInParallel(bool inlineBand)
     // does not write); it ran before the batch was drawn and left the cache where it ends if nothing
     // after it samples.
     GSMem::TexturePageCache::ReadPosition clutRead{};
-    if (m_pendingClutReadIndex > 0u)
-        clutRead = {static_cast<uint32_t>(m_pendingClutReadIndex), std::numeric_limits<int>::min(), std::numeric_limits<int>::min(), 0u, true};
+    if (f.clutReadIndex > 0u)
+        clutRead = {static_cast<uint32_t>(f.clutReadIndex), std::numeric_limits<int>::min(), std::numeric_limits<int>::min(), 0u, true};
     if (!lastRead.after(clutRead))
         return;
     if (!kept.test(lastPage / GSMem::TexturePageCache::kPageSize))
@@ -1400,54 +1490,14 @@ void GSCpuBackend::RasterizeTrackedInParallel(bool inlineBand)
     m_texturePageCache.SetCopy(m_pageRebuildScratch.data(), lastPage);
 }
 
-void GSCpuBackend::RasterizePendingInParallel()
+void GSCpuBackend::FinishUntracked()
 {
-    // The page cached before the batch keeps whatever a sequential draw would leave in it: a page about to
-    // be drawn over is snapshotted first, exactly as PrepareTexturePageCache does for the first writer.
-    uint32_t livePage = 0u;
-    if (m_texturePageCache.LivePage(livePage) &&
-        m_pendingWritePages.test((livePage / GSMem::TexturePageCache::kPageSize) % 512u))
-        m_texturePageCache.Snapshot(m_vram);
-
-    if (!m_workers || m_workers->participants() != RasterParticipants())
-        m_workers = std::make_unique<RasterWorkers>(RasterParticipants());
-    const uint32_t bands = m_workers->participants() * kBandsPerWorker;
-    std::vector<RowRange> rows;
-    BalanceRows(m_pendingRowWeights, bands, rows);
-    std::vector<GSMem::TexturePageCache> &caches = m_bandCaches;
-    caches.resize(bands);
-    for (GSMem::TexturePageCache &cache : caches)
-        cache.ResetForBand(false);
-    std::vector<RasterTrace> traces(bands);
-    std::vector<RasterStats> bandStats(gsStatsEnabled() ? bands : 0u);
-    const std::function<void(uint32_t)> band = [&](uint32_t index)
-    {
-        RasterContext raster{};
-        raster.rowBegin = rows[index].begin;
-        raster.rowEnd = rows[index].end;
-        raster.cache = &caches[index];
-        raster.trace = &traces[index];
-        raster.batched = true;
-        raster.stats = bandStats.empty() ? nullptr : &bandStats[index];
-        for (size_t i = 0; i < m_pending.size(); ++i)
-        {
-            raster.primitive = static_cast<uint32_t>(i);
-            const int32_t clutIndex = m_pendingClutIndex[i];
-            raster.clut = clutIndex >= 0 ? m_pendingCluts[static_cast<size_t>(clutIndex)].data() : nullptr;
-            // Most primitives miss a given band; skipping them here avoids each one's setup per band.
-            if (m_pendingRows[i].end < raster.rowBegin || m_pendingRows[i].begin >= raster.rowEnd)
-                continue;
-            DrawPrimitiveRows(m_pending[i], raster);
-        }
-    };
-    m_workers->runBands(bands, band);
-    for (const RasterStats &stats : bandStats)
-        AddRasterStats(stats);
-
     // Sequentially, the cache would end on the page of the last texel read: the last sampled pixel in
     // primitive then raster order, which lies on exactly one band.
+    const InFlight &f = m_inflight;
+    const std::vector<RasterTrace> &traces = f.traces;
     int best = -1;
-    for (uint32_t i = 0; i < bands; ++i)
+    for (uint32_t i = 0; i < traces.size(); ++i)
     {
         const RasterTrace &trace = traces[i];
         if (!trace.sampled)
@@ -1463,8 +1513,8 @@ void GSCpuBackend::RasterizePendingInParallel()
             best = static_cast<int>(i);
     }
     uint32_t lastPage = 0u;
-    if (best >= 0 && traces[static_cast<size_t>(best)].primitive >= m_pendingClutReadIndex &&
-        caches[static_cast<size_t>(best)].CachedPage(lastPage))
+    if (best >= 0 && traces[static_cast<size_t>(best)].primitive >= f.clutReadIndex &&
+        m_bandCaches[static_cast<size_t>(best)].CachedPage(lastPage))
         m_texturePageCache.SetLivePage(lastPage);
 }
 
@@ -1812,6 +1862,7 @@ void GSCpuBackend::InitializeNow(uint8_t *vram, uint32_t vramSize)
 
     std::lock_guard<std::mutex> lock(m_mutex);
     // A new VRAM binding makes queued primitives meaningless; nothing may still refer to the old memory.
+    WaitInFlightUnlocked();
     ClearPendingUnlocked();
     m_vram = vram;
     m_vramSize = vramSize;
@@ -1860,6 +1911,8 @@ void GSCpuBackend::SubmitNow(const GSPrimitiveBatch &batch)
 void GSCpuBackend::LoadClutNow(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
+    // The load reads VRAM through the texture cache, which a batch in flight still draws and settles.
+    WaitInFlightUnlocked();
     if (!m_pending.empty())
     {
         // Queued primitives captured their palettes, so the load can run now unless it reads memory they
