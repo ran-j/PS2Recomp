@@ -1591,6 +1591,36 @@ namespace
         return words;
     }
 
+    // True when the two words before `address` end a basic block (`jr`/`j`/unconditional `b` plus its
+    // delay slot), so the address can only be entered fresh. A function that follows another function's
+    // return looks like this; a label inside a function normally does not.
+    bool FollowsControlTransfer(const std::vector<ps2recomp::Section> &sections, uint32_t address)
+    {
+        const ps2recomp::Section *section = FindCodeSectionByAddress(sections, address);
+        if (!section || !section->data)
+        {
+            return false;
+        }
+
+        const uint32_t offset = address - section->address;
+        if (offset < 2u * MIPS_INSTRUCTION_SIZE)
+        {
+            return true;
+        }
+
+        uint32_t raw = 0;
+        if (!ReadSectionWord(*section, offset - 2u * MIPS_INSTRUCTION_SIZE, raw))
+        {
+            return false;
+        }
+
+        const uint32_t opcode = OPCODE(raw);
+        const bool isJr = opcode == OPCODE_SPECIAL && FUNCTION(raw) == SPECIAL_JR;
+        const bool isJ = opcode == OPCODE_J;
+        const bool isUnconditionalBranch = opcode == OPCODE_BEQ && RS(raw) == GPR_ZERO && RT(raw) == GPR_ZERO;
+        return isJr || isJ || isUnconditionalBranch;
+    }
+
     void ScanDataFunctionPointerTables(const std::vector<ps2recomp::Section> &sections, std::unordered_set<uint32_t> &starts,
                                        const std::unordered_set<uint32_t> &switchJumpTableWords)
     {
@@ -1728,11 +1758,62 @@ namespace
                 return false;
             };
 
+            // Handler tables keep one code pointer per fixed-size record, so their candidates sit at a
+            // constant stride. Only the shortest handlers pass the conservative probe, which left the
+            // battle command handlers of Mana Khemia (records of six words, returns 6 to 11 words in)
+            // merged into the function before them and unreachable through jalr. Accept a candidate
+            // when it and two equally spaced neighbours all start right after a control transfer and
+            // reach a return: arrays of small integer pairs or ASCII text also produce equally spaced
+            // code-range words, but three such words that all land on block starts do not happen.
+            constexpr uint32_t kMaxRecordStrideBytes = 64u;
+            std::vector<int8_t> entryLikeCache(candidates.size(), -1);
+            auto entryLike = [&](size_t candidateIndex)
+            {
+                int8_t &cached = entryLikeCache[candidateIndex];
+                if (cached < 0)
+                {
+                    const uint32_t target = candidates[candidateIndex].target;
+                    uint32_t firstWord = 0;
+                    const ps2recomp::Section *codeSection = FindCodeSectionByAddress(sections, target);
+                    const bool startsWithNop = !codeSection || !codeSection->data ||
+                                               !ReadSectionWord(*codeSection, target - codeSection->address, firstWord) ||
+                                               firstWord == 0u;
+                    cached = (!startsWithNop &&
+                              FollowsControlTransfer(sections, target) &&
+                              LooksLikeCallableEntry(sections, target, true, true))
+                                 ? 1
+                                 : 0;
+                }
+                return cached == 1;
+            };
+            auto isPeriodicTableEntry = [&](size_t candidateIndex)
+            {
+                const auto stride = [&](size_t from, size_t to) -> uint32_t
+                { return candidates[to].sourceOffset - candidates[from].sourceOffset; };
+                const auto isRun = [&](size_t first, size_t second, size_t third)
+                {
+                    const uint32_t step = stride(first, second);
+                    // A struct field repeating one constant is a run of identical words, not a table.
+                    const bool distinctTargets = candidates[first].target != candidates[second].target ||
+                                                 candidates[second].target != candidates[third].target;
+                    return step >= MIPS_INSTRUCTION_SIZE && step <= kMaxRecordStrideBytes &&
+                           stride(second, third) == step && distinctTargets &&
+                           entryLike(first) && entryLike(second) && entryLike(third);
+                };
+                const size_t count = candidates.size();
+                return (candidateIndex >= 2u && isRun(candidateIndex - 2u, candidateIndex - 1u, candidateIndex)) ||
+                       (candidateIndex >= 1u && candidateIndex + 1u < count &&
+                        isRun(candidateIndex - 1u, candidateIndex, candidateIndex + 1u)) ||
+                       (candidateIndex + 2u < count && isRun(candidateIndex, candidateIndex + 1u, candidateIndex + 2u));
+            };
+
             for (size_t index = 0; index < candidates.size(); ++index)
             {
                 if (candidates[index].hasConservativeShape)
                 {
-                    const bool clustered = dedicatedPointerSection || hasConservativeNeighborWithin(index, kClusterDistanceBytes);
+                    const bool clustered = dedicatedPointerSection ||
+                                           hasConservativeNeighborWithin(index, kClusterDistanceBytes) ||
+                                           isPeriodicTableEntry(index);
                     if (clustered)
                     {
                         starts.insert(candidates[index].target);
@@ -1741,7 +1822,8 @@ namespace
                 }
 
                 const bool hasConservativeAnchor = dedicatedPointerSection || hasClassDescriptorShape(index) || hasAlternatingPointerIdShape(index);
-                if (hasConservativeAnchor && LooksLikeCallableEntry(sections, candidates[index].target, true, true))
+                if ((hasConservativeAnchor && LooksLikeCallableEntry(sections, candidates[index].target, true, true)) ||
+                    isPeriodicTableEntry(index))
                 {
                     starts.insert(candidates[index].target);
                 }
