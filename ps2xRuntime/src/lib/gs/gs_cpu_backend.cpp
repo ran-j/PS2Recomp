@@ -2756,6 +2756,99 @@ uint32_t GSCpuBackend::WriteSpanFor(const PixelPipeline &pipe, int y, SpanPixels
         depthRaw[i] = readTarget(zpsm, m_vram + depthOff[i]);
     }
 
+    // Blended colour for every pixel, as if it passes and blends; the ordered loop below decides which
+    // pixels use it. Integer arithmetic only, so lanes compute exactly what the scalar formula does.
+    uint8_t blendR[SpanPixels::kMax];
+    uint8_t blendG[SpanPixels::kMax];
+    uint8_t blendB[SpanPixels::kMax];
+    const bool blends = state.prim.abe;
+    if (blends)
+    {
+        int i = 0;
+#if defined(__ARM_NEON)
+        auto selectMasks = [](uint8_t sel, int32x4_t &source, int32x4_t &dest)
+        {
+            source = vdupq_n_s32(sel == 0 ? -1 : 0);
+            dest = vdupq_n_s32(sel == 1 ? -1 : 0);
+        };
+        int32x4_t aS, aD, bS, bD, dS, dD;
+        selectMasks(pipe.asel, aS, aD);
+        selectMasks(pipe.bsel, bS, bD);
+        selectMasks(pipe.dsel, dS, dD);
+        const int32x4_t zero = vdupq_n_s32(0);
+        const int32x4_t max = vdupq_n_s32(255);
+        auto pick = [](int32x4_t s, int32x4_t d, int32x4_t cs, int32x4_t cd)
+        {
+            return vorrq_s32(vandq_s32(s, cs), vandq_s32(d, cd));
+        };
+        auto widen = [](const uint8_t *p)
+        {
+            const uint32_t word = static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
+                                  (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
+            return vreinterpretq_s32_u32(vmovl_u16(vget_low_u16(vmovl_u8(vreinterpret_u8_u32(vdup_n_u32(word))))));
+        };
+        for (; i + 4 <= n; i += 4)
+        {
+            const uint32x4_t fb = vld1q_u32(frameRaw + i);
+            // Destination channels as WritePixelFor sees them (RGB24 reads alpha as 0x80).
+            const int32x4_t dr = vreinterpretq_s32_u32(vandq_u32(fb, vdupq_n_u32(0xFFu)));
+            const int32x4_t dg = vreinterpretq_s32_u32(vandq_u32(vshrq_n_u32(fb, 8), vdupq_n_u32(0xFFu)));
+            const int32x4_t db = vreinterpretq_s32_u32(vandq_u32(vshrq_n_u32(fb, 16), vdupq_n_u32(0xFFu)));
+            const int32x4_t da = fpsm == GS_PSM_CT24 ? vdupq_n_s32(0x80) : vreinterpretq_s32_u32(vshrq_n_u32(fb, 24));
+            const int32x4_t sr = widen(span.r + i);
+            const int32x4_t sg = widen(span.g + i);
+            const int32x4_t sb = widen(span.b + i);
+            const int32x4_t sa = widen(span.a + i);
+            const int32x4_t cAlpha = pipe.csel == 0 ? sa : pipe.csel == 1 ? da : vdupq_n_s32(pipe.fix);
+            auto channel = [&](int32x4_t cs, int32x4_t cd)
+            {
+                const int32x4_t a = pick(aS, aD, cs, cd);
+                const int32x4_t b = pick(bS, bD, cs, cd);
+                const int32x4_t d = pick(dS, dD, cs, cd);
+                const int32x4_t v = vaddq_s32(vshrq_n_s32(vmulq_s32(vsubq_s32(a, b), cAlpha), 7), d);
+                return vminq_s32(vmaxq_s32(v, zero), max);
+            };
+            const int32x4_t br = channel(sr, dr);
+            const int32x4_t bg = channel(sg, dg);
+            const int32x4_t bb = channel(sb, db);
+            const uint16x4_t r16 = vmovn_u32(vreinterpretq_u32_s32(br));
+            const uint16x4_t g16 = vmovn_u32(vreinterpretq_u32_s32(bg));
+            const uint16x4_t b16 = vmovn_u32(vreinterpretq_u32_s32(bb));
+            uint16_t rr[4], gg[4], bbv[4];
+            vst1_u16(rr, r16);
+            vst1_u16(gg, g16);
+            vst1_u16(bbv, b16);
+            for (int k = 0; k < 4; ++k)
+            {
+                blendR[i + k] = static_cast<uint8_t>(rr[k]);
+                blendG[i + k] = static_cast<uint8_t>(gg[k]);
+                blendB[i + k] = static_cast<uint8_t>(bbv[k]);
+            }
+        }
+#endif
+        for (; i < n; ++i)
+        {
+            const u32 fbrgba = fpsm == GS_PSM_CT24 ? (frameRaw[i] | 0x80000000u) : frameRaw[i];
+            const int dr = static_cast<int>(fbrgba & 0xFF);
+            const int dg = static_cast<int>((fbrgba >> 8) & 0xFF);
+            const int db = static_cast<int>((fbrgba >> 16) & 0xFF);
+            const int da = static_cast<int>((fbrgba >> 24) & 0xFF);
+            auto pickRGB = [](uint8_t sel, int cs, int cd) -> int
+            {
+                if (sel == 0)
+                    return cs;
+                if (sel == 1)
+                    return cd;
+                return 0;
+            };
+            const int a = span.a[i];
+            const int cAlpha = (pipe.csel == 0) ? a : (pipe.csel == 1) ? da : pipe.fix;
+            blendR[i] = clampU8(((pickRGB(pipe.asel, span.r[i], dr) - pickRGB(pipe.bsel, span.r[i], dr)) * cAlpha >> 7) + pickRGB(pipe.dsel, span.r[i], dr));
+            blendG[i] = clampU8(((pickRGB(pipe.asel, span.g[i], dg) - pickRGB(pipe.bsel, span.g[i], dg)) * cAlpha >> 7) + pickRGB(pipe.dsel, span.g[i], dg));
+            blendB[i] = clampU8(((pickRGB(pipe.asel, span.b[i], db) - pickRGB(pipe.bsel, span.b[i], db)) * cAlpha >> 7) + pickRGB(pipe.dsel, span.b[i], db));
+        }
+    }
+
     uint32_t written = 0u;
     const uint32_t ztestMethod = pipe.ztestMethod;
     for (int i = 0; i < n; ++i)
@@ -2804,24 +2897,12 @@ uint32_t GSCpuBackend::WriteSpanFor(const PixelPipeline &pipe, int y, SpanPixels
 
         if (writesFramebuffer)
         {
-            if (state.prim.abe && !(state.pabe && (a & 0x80u) == 0u))
+            // A blending primitive reads the frame (frmw), so the blend above used this pixel's destination.
+            if (blends && !(state.pabe && (a & 0x80u) == 0u))
             {
-                const int dr = static_cast<int>(fbrgba & 0xFF);
-                const int dg = static_cast<int>((fbrgba >> 8) & 0xFF);
-                const int db = static_cast<int>((fbrgba >> 16) & 0xFF);
-                const int da = static_cast<int>((fbrgba >> 24) & 0xFF);
-                auto pickRGB = [](uint8_t sel, int cs, int cd) -> int
-                {
-                    if (sel == 0)
-                        return cs;
-                    if (sel == 1)
-                        return cd;
-                    return 0;
-                };
-                const int cAlpha = (pipe.csel == 0) ? a : (pipe.csel == 1) ? da : pipe.fix;
-                r = clampU8(((pickRGB(pipe.asel, r, dr) - pickRGB(pipe.bsel, r, dr)) * cAlpha >> 7) + pickRGB(pipe.dsel, r, dr));
-                g = clampU8(((pickRGB(pipe.asel, g, dg) - pickRGB(pipe.bsel, g, dg)) * cAlpha >> 7) + pickRGB(pipe.dsel, g, dg));
-                b = clampU8(((pickRGB(pipe.asel, b, db) - pickRGB(pipe.bsel, b, db)) * cAlpha >> 7) + pickRGB(pipe.dsel, b, db));
+                r = blendR[i];
+                g = blendG[i];
+                b = blendB[i];
             }
             if (writeAlpha && pipe.fbaSetsAlpha)
                 a = static_cast<uint8_t>(a | 0x80u);
