@@ -79,7 +79,7 @@ Fallback workflow for quick local experiments or ELFs with debug symbol :
 ./ps2_analyzer your_game.elf config.toml
 ```
 
-See the [Ghidra Workflow](ps2xAnalyzer/Readme.md#3-ghidra-integration-for-retail-and-stripped-games-preferred) for ghdira instructions.
+See the [Ghidra Workflow](ps2xAnalyzer/Readme.md#3-ghidra-integration-for-retail-and-stripped-games-preferred) for ghidra instructions.
 
 Then build generated output and link with `ps2xRuntime`.
 
