@@ -8,6 +8,13 @@
 #include <regex>
 #include <sstream>
 #include <utility>
+#if defined(_MSC_VER)
+#include <intrin.h>
+#elif defined(USE_SSE2NEON)
+#include "sse2neon.h"
+#else
+#include <immintrin.h>
+#endif
 
 using namespace ps2recomp;
 
@@ -1263,6 +1270,122 @@ void register_code_generator_tests()
                          std::string(item.name) + " should read its source from rt");
                 t.IsTrue(out.find("GPR_VEC(ctx, 4)") == std::string::npos,
                          std::string(item.name) + " should not read its source from rs");
+            }
+        });
+
+        tc.Run("MMI halfword shift immediates use sa[3:0]", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+
+            // Inputs and results are the ps2autotests constants and real-PS2 results from
+            // tests/cpu/ee_simd/logic.expected. Words are listed low to high (w0..w3); logic.expected
+            // prints them high to low. Rows marked "derived" are not in logic.expected and follow
+            // the same sa[3:0] rule (PCSX2 and DobieStation also mask with 0xF).
+            constexpr uint32_t kOnes[4] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu}; // -1
+            constexpr uint32_t kOne[4] = {0x00000001u, 0x00000000u, 0x00000000u, 0x00000000u};  // C_ONE
+            constexpr uint32_t kS16Min[4] = {0xFFFF8000u, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu}; // C_S16_MIN
+
+            struct HalfwordShiftCase
+            {
+                const char *name;
+                uint8_t function;
+                const uint32_t *input;
+                uint8_t sa;
+                uint32_t expected[4];
+            };
+
+            const std::vector<HalfwordShiftCase> cases = {
+                {"PSLLH", MMI_PSLLH, kOne, 0, {0x00000001u, 0x00000000u, 0x00000000u, 0x00000000u}},
+                {"PSLLH", MMI_PSLLH, kOnes, 1, {0xFFFEFFFEu, 0xFFFEFFFEu, 0xFFFEFFFEu, 0xFFFEFFFEu}},
+                {"PSLLH", MMI_PSLLH, kOnes, 15, {0x80008000u, 0x80008000u, 0x80008000u, 0x80008000u}},
+                {"PSLLH", MMI_PSLLH, kOnes, 16, {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu}},
+                {"PSLLH", MMI_PSLLH, kOnes, 17, {0xFFFEFFFEu, 0xFFFEFFFEu, 0xFFFEFFFEu, 0xFFFEFFFEu}}, // derived
+                {"PSLLH", MMI_PSLLH, kOnes, 31, {0x80008000u, 0x80008000u, 0x80008000u, 0x80008000u}},
+                {"PSLLH", MMI_PSLLH, kOne, 30, {0x00004000u, 0x00000000u, 0x00000000u, 0x00000000u}},
+                {"PSLLH", MMI_PSLLH, kOne, 31, {0x00008000u, 0x00000000u, 0x00000000u, 0x00000000u}},
+
+                {"PSRLH", MMI_PSRLH, kOne, 0, {0x00000001u, 0x00000000u, 0x00000000u, 0x00000000u}},
+                {"PSRLH", MMI_PSRLH, kOnes, 1, {0x7FFF7FFFu, 0x7FFF7FFFu, 0x7FFF7FFFu, 0x7FFF7FFFu}},
+                {"PSRLH", MMI_PSRLH, kOnes, 15, {0x00010001u, 0x00010001u, 0x00010001u, 0x00010001u}},
+                {"PSRLH", MMI_PSRLH, kOnes, 16, {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu}},
+                {"PSRLH", MMI_PSRLH, kOnes, 17, {0x7FFF7FFFu, 0x7FFF7FFFu, 0x7FFF7FFFu, 0x7FFF7FFFu}}, // derived
+                {"PSRLH", MMI_PSRLH, kOnes, 31, {0x00010001u, 0x00010001u, 0x00010001u, 0x00010001u}},
+                {"PSRLH", MMI_PSRLH, kS16Min, 3, {0x1FFF1000u, 0x1FFF1FFFu, 0x1FFF1FFFu, 0x1FFF1FFFu}},
+
+                {"PSRAH", MMI_PSRAH, kOne, 0, {0x00000001u, 0x00000000u, 0x00000000u, 0x00000000u}},
+                {"PSRAH", MMI_PSRAH, kS16Min, 1, {0xFFFFC000u, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu}},  // derived
+                {"PSRAH", MMI_PSRAH, kS16Min, 3, {0xFFFFF000u, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu}},
+                {"PSRAH", MMI_PSRAH, kS16Min, 15, {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu}}, // derived
+                {"PSRAH", MMI_PSRAH, kS16Min, 16, {0xFFFF8000u, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu}}, // derived
+                {"PSRAH", MMI_PSRAH, kS16Min, 17, {0xFFFFC000u, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu}}, // derived
+                {"PSRAH", MMI_PSRAH, kS16Min, 31, {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu}}, // derived
+                {"PSRAH", MMI_PSRAH, kOnes, 16, {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu}},
+                {"PSRAH", MMI_PSRAH, kOnes, 31, {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu}},
+            };
+
+            const std::regex shiftPattern(R"(_mm_(slli|srli|srai)_epi16\(GPR_VEC\(ctx, 5\), (\d+)\))");
+
+            for (const HalfwordShiftCase &item : cases)
+            {
+                Instruction inst{};
+                inst.isMMI = true;
+                inst.opcode = OPCODE_MMI;
+                inst.function = item.function;
+                inst.rd = 3;
+                inst.rt = 5;
+                inst.sa = item.sa;
+
+                const std::string label = std::string(item.name) + " sa " + std::to_string(item.sa);
+                const std::string out = gen.translateInstruction(inst);
+
+                std::smatch match;
+                const bool found = std::regex_search(out, match, shiftPattern);
+                t.IsTrue(found, label + " should emit a 16-bit SSE shift of rt");
+                if (!found)
+                {
+                    continue;
+                }
+
+                // Run the emitted shift on the host to compare it with the PS2 result.
+                const int count = std::stoi(match[2].str());
+                const __m128i input = _mm_loadu_si128(reinterpret_cast<const __m128i *>(item.input));
+                __m128i result;
+                if (match[1] == "slli")
+                    result = _mm_slli_epi16(input, count);
+                else if (match[1] == "srli")
+                    result = _mm_srli_epi16(input, count);
+                else
+                    result = _mm_srai_epi16(input, count);
+
+                uint32_t words[4];
+                _mm_storeu_si128(reinterpret_cast<__m128i *>(words), result);
+                for (int i = 0; i < 4; ++i)
+                {
+                    t.Equals(words[i], item.expected[i], label + " word " + std::to_string(i) + " should match the PS2");
+                }
+            }
+        });
+
+        tc.Run("MMI word shift immediates keep all five sa bits", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+
+            const std::vector<std::pair<uint8_t, std::string>> cases = {
+                {MMI_PSLLW, "_mm_slli_epi32(GPR_VEC(ctx, 5), 31)"},
+                {MMI_PSRLW, "_mm_srli_epi32(GPR_VEC(ctx, 5), 31)"},
+                {MMI_PSRAW, "_mm_srai_epi32(GPR_VEC(ctx, 5), 31)"},
+            };
+
+            for (const auto &[function, expected] : cases)
+            {
+                Instruction inst{};
+                inst.isMMI = true;
+                inst.opcode = OPCODE_MMI;
+                inst.function = function;
+                inst.rd = 3;
+                inst.rt = 5;
+                inst.sa = 31;
+
+                const std::string out = gen.translateInstruction(inst);
+                t.IsTrue(out.find(expected) != std::string::npos, expected + " should be emitted for sa 31");
             }
         });
 
