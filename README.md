@@ -146,6 +146,7 @@ API:
 * Header: `ps2xRuntime/include/game_overrides.h`
 * Register macro: `PS2_REGISTER_GAME_OVERRIDE(name, elfName, entry, crc32, applyFn)`
 * Direct bind helper: `ps2_game_overrides::bindAddressHandler(runtime, addr, "handler")`
+* Location: put override `.cpp` files in `ps2xRuntime/src/game_overrides/`, which is built into `ps2EntryRunner`. Overrides register through static initializers, so a file compiled into the `ps2_runtime` static library is dropped by the linker and never runs. At startup the runtime logs how many overrides are registered and applied.
 
 Use Game Override modules when:
 

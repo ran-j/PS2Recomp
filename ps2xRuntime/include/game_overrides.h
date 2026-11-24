@@ -34,6 +34,9 @@ namespace ps2_game_overrides
     bool bindAddressHandler(PS2Runtime &runtime, uint32_t address, std::string_view handlerName);
 }
 
+// PS2_REGISTER_GAME_OVERRIDE registers through a static initializer. Put the file in
+// ps2xRuntime/src/game_overrides/, which is compiled into ps2EntryRunner. A file compiled into the
+// ps2_runtime static library is dropped by the linker (nothing references it) and never registers.
 #define PS2_GAME_OVERRIDE_JOIN2(a, b) a##b
 #define PS2_GAME_OVERRIDE_JOIN(a, b) PS2_GAME_OVERRIDE_JOIN2(a, b)
 
