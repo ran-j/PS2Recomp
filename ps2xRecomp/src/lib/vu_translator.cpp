@@ -267,17 +267,13 @@ namespace ps2recomp
                     std::string shuffle_pattern = fmt::format("_MM_SHUFFLE({},{},{},{})", field, field, field, field);
 
                     return fmt::format(
-                        "{{ __m128 fs = ctx->vu0_vf[{}]; "
-                        "__m128 ft = _mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], {}); "
-                        "__m128 neg_ft = _mm_xor_ps(ft, _mm_castsi128_ps(_mm_set1_epi32(0x80000000))); "
-                        "__m128 gt = _mm_cmpgt_ps(fs, ft); "
-                        "__m128 lt = _mm_cmplt_ps(fs, neg_ft); "
-                        "uint32_t gt_mask = (uint32_t)_mm_movemask_ps(gt); "
-                        "uint32_t lt_mask = (uint32_t)_mm_movemask_ps(lt); "
-                        "uint32_t flags = ((lt_mask & 0x1) << 0) | ((gt_mask & 0x1) << 1) | "
-                        "((lt_mask & 0x2) << 1) | ((gt_mask & 0x2) << 2) | "
-                        "((lt_mask & 0x4) << 2) | ((gt_mask & 0x4) << 3); "
-                        "ctx->vu0_clip_flags = ((ctx->vu0_clip_flags << 6) | (flags & 0x3F)) & 0xFFFFFF; }}",
+                        "{{ alignas(16) float fs_l[4]; alignas(16) float ft_l[4]; "
+                        "_mm_store_ps(fs_l, ctx->vu0_vf[{}]); "
+                        "_mm_store_ps(ft_l, _mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], {})); "
+                        "uint32_t xb, yb, zb, wb; "
+                        "std::memcpy(&xb, &fs_l[0], 4); std::memcpy(&yb, &fs_l[1], 4); "
+                        "std::memcpy(&zb, &fs_l[2], 4); std::memcpy(&wb, &ft_l[0], 4); "
+                        "ctx->vu0_clip_flags = ps2_vu_clip(ctx->vu0_clip_flags, xb, yb, zb, wb); }}",
                         inst.rd, inst.rt, inst.rt, shuffle_pattern);
                 }
                 case VU0_S2_VNOP:
