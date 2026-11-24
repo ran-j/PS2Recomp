@@ -843,7 +843,7 @@ void register_code_generator_tests()
         t.IsTrue(generated.find("goto label_") == std::string::npos, "external branch should not use goto");
     });
 
-    tc.Run("jumps to known symbols call by name", [](TestCase &t) {
+    tc.Run("jumps to known symbols dispatch through the runtime", [](TestCase &t) {
         Function func;
         func.name = "call_symbol";
         func.start = 0x4000;
@@ -869,10 +869,18 @@ void register_code_generator_tests()
 
         CodeGenerator gen({targetSym}, {});
         std::string generated = gen.generateFunction(func, instructions, false);
-        printGeneratedCode("jumps to known symbols call by name", generated);
+        printGeneratedCode("jumps to known symbols dispatch through the runtime", generated);
 
-        t.IsTrue(generated.find("target_func(rdram, ctx, runtime); return;") != std::string::npos,
-                 "jump to known function should emit direct call");
+        // A J may be rewritten by the title at run time, so even a jump to a
+        // known function is dispatched by address instead of called by name.
+        t.IsTrue(generated.find("    ctx->pc = 0x5000u;\n"
+                                "    if (!runtime->dispatchGuestBranch(rdram, ctx, 0x5000u, 0x4000u, 0x0u, "
+                                "PS2Runtime::GuestBranchKind::DirectJump, \"J\")) {\n"
+                                "        return;\n"
+                                "    }\n") != std::string::npos,
+                 "jump to known function should dispatch as a DirectJump but got: " + generated);
+        t.IsTrue(generated.find("target_func(rdram, ctx, runtime)") == std::string::npos,
+                 "jump to known function must not be emitted as a direct C++ call");
     });
 
     tc.Run("jump to unknown target sets pc", [](TestCase &t) {
@@ -927,7 +935,7 @@ void register_code_generator_tests()
                  "jump table should use renamed function name");
         });
 
-        tc.Run("reserved identifiers are sanitized and used in calls", [](TestCase &t) {
+        tc.Run("reserved identifiers are sanitized; jumps to them dispatch by address", [](TestCase &t) {
             Function func;
             func.name = "__is_pointer";
             func.start = 0x9000;
@@ -954,12 +962,18 @@ void register_code_generator_tests()
             gen.setRenamedFunctions({{targetSym.address, "ps2___is_pointer"}});
 
             std::string generated = gen.generateFunction(func, instructions, false);
-            printGeneratedCode("reserved identifiers are sanitized and used in calls", generated);
+            printGeneratedCode("reserved identifiers are sanitized; jumps to them dispatch by address", generated);
 
             t.IsTrue(generated.find("void ps2___is_pointer(") != std::string::npos,
                      "definition should use sanitized name");
-            t.IsTrue(generated.find("ps2___is_pointer(rdram, ctx, runtime); return;") != std::string::npos,
-                "call should use sanitized name but got: " + generated);
+            t.IsTrue(generated.find("    ctx->pc = 0x9000u;\n"
+                                    "    if (!runtime->dispatchGuestBranch(rdram, ctx, 0x9000u, 0x8000u, 0x0u, "
+                                    "PS2Runtime::GuestBranchKind::DirectJump, \"J\")) {\n"
+                                    "        return;\n"
+                                    "    }\n") != std::string::npos,
+                "jump should dispatch by address as a DirectJump but got: " + generated);
+            t.IsTrue(generated.find("ps2___is_pointer(rdram, ctx, runtime)") == std::string::npos,
+                     "jump must not be emitted as a direct C++ call by name");
         });
 
         tc.Run("COP0 MFC0/MTC0 translate to COP0 register access", [](TestCase &t) {

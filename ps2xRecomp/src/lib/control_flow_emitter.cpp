@@ -207,23 +207,6 @@ namespace ps2recomp
         m_ss << fmt::format("{}}}\n", indent);
     }
 
-    bool ControlFlowEmitter::emitDirectFunctionJumpIfAvailable(uint32_t target, StaticBranchKind kind, std::string_view indent)
-    {
-        if (kind != StaticBranchKind::Jump)
-        {
-            return false;
-        }
-
-        const std::string functionName = m_gen.getFunctionName(target);
-        if (functionName.empty())
-        {
-            return false;
-        }
-
-        m_ss << indent << functionName << "(rdram, ctx, runtime); return;\n";
-        return true;
-    }
-
     void ControlFlowEmitter::emitExternalJumpDispatch(uint32_t target, StaticBranchKind kind, std::string_view indent)
     {
         const bool isCall = kind == StaticBranchKind::Call;
@@ -343,11 +326,10 @@ namespace ps2recomp
             return;
         }
 
-        if (emitDirectFunctionJumpIfAvailable(target, kind, "    "))
-        {
-            return;
-        }
-
+        // A J to another function goes through the runtime like a JAL, never
+        // as a direct C++ call: the title may rewrite the J at run time (as
+        // Stuntman's heap init does to `free`), and only the runtime can see
+        // the word now in guest RAM.
         emitExternalJumpDispatch(target, kind, "    ");
     }
 
