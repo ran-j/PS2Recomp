@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <string>
 #include <string_view>
 #include <thread>
 #include <utility>
@@ -72,6 +73,17 @@ namespace
     constexpr uint32_t kInvocationQueuePc = 0x00160530u;
     constexpr uint32_t kInvocationQueueResumePc = 0x00160540u;
     constexpr uint32_t kInvocationQueueHandlerPc = 0x00160550u;
+    constexpr uint32_t kStoreKickPc = 0x00160600u;
+    constexpr uint32_t kStoreKickResumePc = 0x00160610u;
+    constexpr uint32_t kStoreKickHandlerPc = 0x00160620u;
+
+    // The to-scratchpad DMA channel completes synchronously when kicked and
+    // raises DMAC cause 9.
+    constexpr uint32_t kToSprChcr = 0x1000D400u;
+    constexpr uint32_t kToSprMadr = 0x1000D410u;
+    constexpr uint32_t kToSprQwc = 0x1000D420u;
+    constexpr uint32_t kToSprSadr = 0x1000D480u;
+    constexpr uint32_t kToSprCause = 9u;
 
     constexpr uint32_t kTimer2Count = 0x10001000u;
     constexpr uint32_t kTimer2Mode = 0x10001010u;
@@ -97,6 +109,9 @@ namespace
     uint32_t g_invocationQueueRuns = 0u;
     uint32_t g_invocationQueueSp = 0u;
     bool g_invocationQueueSpChanged = false;
+    uint32_t g_storeKickWidth = 0u;
+    bool g_storeKickHandlerRan = false;
+    bool g_storeKickHandledBeforeResume = false;
 
     void setRegU32(R5900Context &ctx, int reg, uint32_t value)
     {
@@ -373,6 +388,49 @@ namespace
         ctx->pc = 0u;
         runtime->requestStop();
     }
+
+    void storeKickHandler(uint8_t *, R5900Context *ctx, PS2Runtime *)
+    {
+        g_storeKickHandlerRan = true;
+        ctx->pc = 0u;
+    }
+
+    // Starts a one-quadword to-scratchpad DMA and sets CHCR.STR with a store of
+    // g_storeKickWidth bits, the way generated code does for sb/sh/sw/sd/sq.
+    void storeKick(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        runtime->eeScheduler().addIrqHandler(true, kToSprCause, kStoreKickHandlerPc, true, 0u, 0u, 0u);
+        runtime->Store32(rdram, ctx, kToSprMadr, 0x00021000u);
+        runtime->Store32(rdram, ctx, kToSprQwc, 1u);
+        runtime->Store32(rdram, ctx, kToSprSadr, 0u);
+        ctx->pc = kStoreKickResumePc;
+        constexpr uint32_t kChcrStr = 0x100u;
+        switch (g_storeKickWidth)
+        {
+        case 8u:
+            runtime->Store8(rdram, ctx, kToSprChcr + 1u, static_cast<uint8_t>(kChcrStr >> 8u));
+            break;
+        case 16u:
+            runtime->Store16(rdram, ctx, kToSprChcr, static_cast<uint16_t>(kChcrStr));
+            break;
+        case 32u:
+            runtime->Store32(rdram, ctx, kToSprChcr, kChcrStr);
+            break;
+        case 64u:
+            runtime->Store64(rdram, ctx, kToSprChcr, kChcrStr);
+            break;
+        default:
+            runtime->Store128(rdram, ctx, kToSprChcr, _mm_set_epi64x(0, kChcrStr));
+            break;
+        }
+    }
+
+    void storeKickResume(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        g_storeKickHandledBeforeResume = g_storeKickHandlerRan;
+        ctx->pc = 0u;
+        runtime->requestStop();
+    }
 }
 
 void register_ps2_runtime_interrupt_tests()
@@ -570,6 +628,30 @@ void register_ps2_runtime_interrupt_tests()
                      "IRQ handler must not reuse the transient stack captured at registration");
             t.Equals(guardAfter, guard,
                      "IRQ handler stack writes must not clobber the registering thread's live frame");
+        });
+
+        tc.Run("a DMA kicked by a store of any width delivers its completion interrupt before the guest continues", [](TestCase &t)
+        {
+            for (const uint32_t width : {8u, 16u, 32u, 64u, 128u})
+            {
+                TestEnv env;
+                t.IsTrue(env.runtime.memory().initialize(), "runtime memory initialize should succeed");
+                env.runtime.registerFunction(kStoreKickPc, storeKick);
+                env.runtime.registerFunction(kStoreKickResumePc, storeKickResume);
+                env.runtime.registerFunction(kStoreKickHandlerPc, storeKickHandler);
+                g_storeKickWidth = width;
+                g_storeKickHandlerRan = false;
+                g_storeKickHandledBeforeResume = false;
+
+                R5900Context mainContext{};
+                mainContext.pc = kStoreKickPc;
+                env.runtime.eeScheduler().reset(env.rdram.data(), mainContext);
+                env.runtime.eeScheduler().run();
+
+                t.IsTrue(g_storeKickHandledBeforeResume,
+                         "kicked by a store of " + std::to_string(width) +
+                             " bits, the DMA's DMAC handler should run before the guest continues");
+            }
         });
 
         tc.Run("pending async callbacks execute sequentially on a reusable invocation stack", [](TestCase &t)

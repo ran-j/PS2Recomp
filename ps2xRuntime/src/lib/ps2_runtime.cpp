@@ -1574,9 +1574,14 @@ void PS2Runtime::handleBreak(uint8_t *rdram, R5900Context *ctx)
 
 void PS2Runtime::drainCompletedDmacHandlers(uint8_t *rdram)
 {
-    for (uint32_t cause : m_memory.consumeCompletedDmacCauses())
+    // This runs after every guest store to a special address, scratchpad
+    // included, so test the queue before taking its lock.
+    if (m_memory.hasCompletedDmacCauses())
     {
-        ps2_syscalls::dispatchDmacHandlersForCause(rdram, this, cause);
+        for (uint32_t cause : m_memory.consumeCompletedDmacCauses())
+        {
+            ps2_syscalls::dispatchDmacHandlersForCause(rdram, this, cause);
+        }
     }
 }
 
@@ -2190,6 +2195,7 @@ void PS2Runtime::Store8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint8
     try
     {
         m_memory.write8(vaddr, value);
+        drainCompletedDmacHandlers(rdram);
     }
     catch (const std::exception &)
     {
@@ -2203,6 +2209,7 @@ void PS2Runtime::Store16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint
     try
     {
         m_memory.write16(vaddr, value);
+        drainCompletedDmacHandlers(rdram);
     }
     catch (const std::exception &)
     {
@@ -2230,6 +2237,7 @@ void PS2Runtime::Store64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint
     try
     {
         m_memory.write64(vaddr, value);
+        drainCompletedDmacHandlers(rdram);
     }
     catch (const std::exception &)
     {
@@ -2245,6 +2253,7 @@ void PS2Runtime::Store128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, __m
     try
     {
         m_memory.write128(vaddr, value);
+        drainCompletedDmacHandlers(rdram);
     }
     catch (const std::exception &)
     {
