@@ -453,7 +453,11 @@ static inline uint64_t Ps2FastRead64(const uint8_t *rdram, uint32_t addr)
 
 static inline __m128i Ps2FastRead128(const uint8_t *rdram, uint32_t addr)
 {
-    const uint32_t offset = addr & PS2_RAM_MASK;
+    // EE LQ ignores the low 4 bits of the effective address (16-byte
+    // alignment is forced, not faulted). Gen code for LQ lands here, so an
+    // unaligned guest LQ must read the aligned quadword below — Sony's libc
+    // memcpy relies on it (LQ at src+0x00/0x10/0x20/0x30 + QFSRV repair).
+    const uint32_t offset = (addr & ~0xFu) & PS2_RAM_MASK;
     if (!Ps2FastRangeIsContiguous(offset, sizeof(__m128i)))
     {
         alignas(16) uint8_t wrapped[sizeof(__m128i)];
@@ -526,7 +530,9 @@ static inline void Ps2FastWrite64(uint8_t *rdram, uint32_t addr, uint64_t value)
 
 static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
 {
-    const uint32_t offset = addr & PS2_RAM_MASK;
+    // EE SQ ignores the low 4 bits of the effective address — same as
+    // Ps2FastRead128 above.
+    const uint32_t offset = (addr & ~0xFu) & PS2_RAM_MASK;
     if (!Ps2FastRangeIsContiguous(offset, sizeof(__m128i)))
     {
         alignas(16) uint8_t wrapped[sizeof(__m128i)];
