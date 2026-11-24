@@ -29,7 +29,8 @@ require their IRX modules and support for the imports and hardware they use.
 - `loadModule(...)` / `loadModuleBuffer(...)` load and start an IRX.
 - `stopModule(...)` releases a module and its owned state.
 - `runEeCycles(...)` advances the IOP from EE cycle accounting.
-- `selectRpcAbi(...)`, `handleRpc(...)` and `onSifTransfer(...)` connect SIF transport.
+- `selectRpcAbi(...)`, `handleRpc(...)`, `onSifTransfer(...)` and
+  `receiveSifCommand(...)` (EE `sceSifSendCmd` packets) connect SIF transport.
 
 IOP RAM is separate from EE RAM. The transport copies data through the IOP
 memory accessors; SIF notifications do not mirror bytes into equal-numbered EE

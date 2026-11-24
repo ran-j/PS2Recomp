@@ -44,6 +44,18 @@ public:
         }
     }
 
+    // EE sceSifSendCmd: hands a packet, header filled in, to the IOP's SIF
+    // command dispatcher. True when an IOP handler consumed it.
+    static bool sendSifCommand(
+        PS2Runtime *runtime,
+        uint8_t *rdram,
+        uint32_t commandId,
+        const void *packet,
+        size_t packetSize)
+    {
+        return runtime && runtime->sendIopSifCommand(rdram, commandId, packet, packetSize);
+    }
+
     static void reset(PS2Runtime *runtime)
     {
         if (runtime)

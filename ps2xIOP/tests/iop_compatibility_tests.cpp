@@ -287,6 +287,44 @@ namespace
         require(iop.handleRpc(request(0x80000701u, 0x8010u)).handled, "LIBSD RPC not handled");
         require(host.audioCalls == 1u, "DBCMAN option intercepted LIBSD RPC");
     }
+
+    void eeSetSregReachesGetSreg()
+    {
+        constexpr uint32_t sid = 0x5E600031u;
+        constexpr uint32_t setSreg = 0x80000001u;
+        Host host;
+        IopSubsystem iop(host);
+        const auto load = [&]
+        {
+            sregReader(sid, 31u).install(host);
+            require(iop.loadModuleBuffer(0x1000u).startResult == 0, "sreg reader IRX failed");
+        };
+        const auto sreg31 = [&]
+        {
+            require(iop.handleRpc(request(sid, 0u)).handled, "sreg reader RPC not handled");
+            return host.word(0x800u);
+        };
+        load();
+        require(sreg31() == 0u, "sreg 31 not zero at boot");
+
+        // SifCmdSRegData as the EE sends it: header (psize, dest, cid, opt), index, value.
+        std::array<uint32_t, 6> packet{24u, 0u, setSreg, 0u, 31u, 0xC0FFEE00u};
+        require(iop.receiveSifCommand(setSreg, packet.data(), sizeof(packet)), "SET_SREG not consumed");
+        require(sreg31() == 0xC0FFEE00u, "sceSifGetSreg did not return the value set by the EE");
+
+        packet[4] = 32u;
+        require(!iop.receiveSifCommand(setSreg, packet.data(), sizeof(packet)), "sreg index 32 accepted");
+        packet[4] = 31u;
+        packet[5] = 0x1234u;
+        require(!iop.receiveSifCommand(setSreg, packet.data(), 20u), "truncated SET_SREG accepted");
+        require(!iop.receiveSifCommand(0x00000010u, packet.data(), sizeof(packet)),
+                "user command consumed without an IOP handler");
+        require(sreg31() == 0xC0FFEE00u, "a rejected command changed sreg 31");
+
+        iop.reset();
+        load();
+        require(sreg31() == 0u, "sregs survived an IOP reset");
+    }
 }
 
 int main()
@@ -310,6 +348,7 @@ int main()
         {"HLE repeated loads and alias lifetime", moduleLifetime},
         {"Loader outcomes are bounded and resettable", loaderDiagnostics},
         {"LIBSD audio dispatch is unchanged", libsdUnchanged},
+        {"EE SIF_CMD_SET_SREG sets the sreg sceSifGetSreg reads", eeSetSregReachesGetSreg},
     };
     return run(tests);
 }
