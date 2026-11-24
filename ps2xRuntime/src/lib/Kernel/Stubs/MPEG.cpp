@@ -2458,9 +2458,15 @@ namespace ps2_stubs
         // Only the producer/demux EOF is authoritative. A sequence_end_code can
         // be observed while more PSS data is still buffered, and a decoder
         // failure before producer EOF may still recover on a later sequence.
+        // Generation 0 means no sceCdSt stream ever fed this playback (games that
+        // sceCdRead into their own ring), so there is no producer EOF to wait
+        // for; the PSS program end code is the end of the whole file instead.
+        const bool cdStreamFed = playback.cdStreamGeneration != 0u;
         const bool producerEnded =
-            g_mpeg_stub_state.currentCdStreamEofSeen &&
-            playback.cdStreamGeneration == g_mpeg_stub_state.cdStreamGeneration;
+            cdStreamFed
+                ? (g_mpeg_stub_state.currentCdStreamEofSeen &&
+                   playback.cdStreamGeneration == g_mpeg_stub_state.cdStreamGeneration)
+                : playback.streamEnded;
         const bool ended = producerEnded &&
                            (playback.streamEnded || (playback.decoderFailed && playback.sawInput));
         const uint64_t presentationEnd = playback.presentationEndTickQ32;
@@ -2477,6 +2483,7 @@ namespace ps2_stubs
                 std::cerr << "[MPEG:IsEnd] mpeg=0x" << std::hex << mpegAddr << std::dec
                           << " ended=" << ended
                           << " producerEof=" << producerEnded
+                          << " cdStreamFed=" << cdStreamFed
                           << " seqEnd=" << playback.sawSequenceEnd
                           << " streamEnded=" << playback.streamEnded
                           << " presentationComplete=" << presentationComplete
