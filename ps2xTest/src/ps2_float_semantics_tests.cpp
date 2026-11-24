@@ -224,5 +224,24 @@ void register_ps2_float_semantics_tests()
             t.IsTrue(rsqrt.find("ctx->f[2] = FPU_RSQRT_S(ctx->f[3], ctx->f[4])") != std::string::npos,
                      "RSQRT.S should compute fs / sqrt(ft) but got: " + rsqrt);
         });
+
+        tc.Run("FPU CVT.W.S truncates toward zero and saturates by sign", [](TestCase &t)
+        {
+            const auto cvt = [](float f) { return static_cast<uint32_t>(FPU_CVT_W_S(f)); };
+            // 2.5 and 3.7 differ between round-to-nearest (2/4) and truncation (2/3).
+            t.Equals(cvt(3.7f), 3u, "3.7 should truncate to 3");
+            t.Equals(cvt(-3.7f), static_cast<uint32_t>(-3), "-3.7 should truncate toward zero to -3");
+            t.Equals(cvt(0.999f), 0u, "0.999 should truncate to 0");
+            // A volume scale like 0.9 * 0x3FFF = 14744.7 truncates to 14744, not 14745.
+            t.Equals(cvt(FPU_MUL_S(0.9f, 16383.0f)), 14744u, "0.9 * 0x3FFF should truncate to 14744");
+            t.Equals(cvt(floatOf(0x4EFFFFFFu)), 0x7FFFFF80u, "the largest float below 2^31 should convert exactly");
+            t.Equals(cvt(2147483648.0f), 0x7FFFFFFFu, "2^31 should saturate to 0x7FFFFFFF");
+            t.Equals(cvt(-2147483648.0f), 0x80000000u, "-2^31 should give 0x80000000");
+            t.Equals(cvt(1.0e20f), 0x7FFFFFFFu, "1e20 should saturate to 0x7FFFFFFF");
+            t.Equals(cvt(-1.0e20f), 0x80000000u, "-1e20 should saturate to 0x80000000");
+            t.Equals(cvt(floatOf(0x7FFFFFFFu)), 0x7FFFFFFFu, "+max (a NaN pattern on the host) should saturate to 0x7FFFFFFF");
+            t.Equals(cvt(floatOf(0xFFC00000u)), 0x80000000u, "a negative exponent-255 pattern should saturate to 0x80000000");
+            t.Equals(cvt(floatOf(0x00000001u)), 0u, "a denormal should convert to 0");
+        });
     });
 }
