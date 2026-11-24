@@ -992,6 +992,28 @@ void register_code_generator_tests()
             t.IsTrue(mtc0Code.find("Unhandled COP0") == std::string::npos, "MTC0 should not hit unhandled COP0 path");
         });
 
+        tc.Run("COP0 Count reads and writes go through the runtime cycle clock", [](TestCase &t) {
+            CodeGenerator gen({}, {});
+
+            Instruction mfc0{};
+            mfc0.opcode = OPCODE_COP0;
+            mfc0.rs = COP0_MF;
+            mfc0.rt = 2;
+            mfc0.rd = COP0_REG_COUNT;
+            const std::string mfc0Code = gen.translateInstruction(mfc0);
+            t.IsTrue(mfc0Code.find("SET_GPR_S32(ctx, 2, (int32_t)runtime->readCop0Count())") != std::string::npos,
+                     "MFC0 Count should read the running counter, got: " + mfc0Code);
+
+            Instruction mtc0{};
+            mtc0.opcode = OPCODE_COP0;
+            mtc0.rs = COP0_MT;
+            mtc0.rt = 4;
+            mtc0.rd = COP0_REG_COUNT;
+            const std::string mtc0Code = gen.translateInstruction(mtc0);
+            t.IsTrue(mtc0Code.find("runtime->writeCop0Count(GPR_U32(ctx, 4))") != std::string::npos,
+                     "MTC0 Count should rebase the running counter, got: " + mtc0Code);
+        });
+
         tc.Run("FCR access uses CFC1/CTC1", [](TestCase &t) {
             CodeGenerator gen({}, {});
 

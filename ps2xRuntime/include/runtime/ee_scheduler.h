@@ -285,6 +285,7 @@ public:
     [[nodiscard]] bool checkpointDue(uint32_t cycles = kGeneratedCheckpointCycles) noexcept;
     // Advances EE time and runs the IOP up to it immediately.
     void accountCycles(uint32_t cycles) noexcept;
+    [[nodiscard]] uint64_t eeCycle() const noexcept { return m_eeCycle; }
     [[nodiscard]] bool isExecutingGuest() const noexcept;
 
     // Kernel object API. All calls except postEvent/requestStop execute on the
