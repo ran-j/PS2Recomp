@@ -220,6 +220,7 @@ namespace ps2x::iop::detail
             server.callback = m_memory.read32(stackPointer + 16u);
             server.callbackBuffer = m_memory.read32(stackPointer + 20u);
             server.queue = m_memory.read32(stackPointer + 24u);
+            server.priority = m_kernel.currentPriority();
             m_servers[server.sid] = server;
             if (server.serverData != 0u)
             {
@@ -244,9 +245,25 @@ namespace ps2x::iop::detail
             m_kernel.sleepCurrent(cpu);
             setV0(0);
             return true;
-        case 23:
+        case 23: // sceSifGetOtherData(receiveData, eeSource, iopDestination, size, mode)
+        {
+            // Servers pull large payloads (e.g. memory card writes) straight from EE memory.
+            const uint32_t source = cpu.gpr[5];
+            const uint32_t destination = cpu.gpr[6];
+            const int32_t size = static_cast<int32_t>(cpu.gpr[7]);
+            if (size > 0)
+            {
+                std::vector<uint8_t> payload(static_cast<size_t>(size));
+                if (!m_host.readGuest(source, payload.data(), payload.size()) ||
+                    !m_memory.writeRam(destination, payload.data(), payload.size()))
+                {
+                    setV0(static_cast<uint32_t>(-1));
+                    return true;
+                }
+            }
             setV0(0);
             return true;
+        }
         case 24: // RemoveRpc
         {
             const uint32_t serverData = cpu.gpr[4];
@@ -339,6 +356,12 @@ namespace ps2x::iop::detail
             else
                 ++server;
         }
+    }
+
+    int IopRpcBridge::serverPriority(uint32_t sid) const noexcept
+    {
+        const auto server = m_servers.find(sid);
+        return server != m_servers.end() ? server->second.priority : -1;
     }
 
     bool IopRpcBridge::hasServer(uint32_t sid) const noexcept

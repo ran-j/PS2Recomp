@@ -12,6 +12,7 @@
 #include <mutex>
 
 #include "gs/ps2_gif_arbiter.h"
+#include "ps2_ipu.h"
 #if defined(_MSC_VER)
 #include <intrin.h>
 #elif defined(USE_SSE2NEON)
@@ -101,6 +102,16 @@ inline bool ps2IsScratchpadAddress(uint32_t addr)
     }
 
     return false;
+}
+
+// DMAC addresses (MADR, TADR, ASR, DMAtag ADDR) select scratchpad with bit 31 and carry its offset in the low bits.
+inline uint32_t ps2DmacAddressToEe(uint32_t addr)
+{
+    if ((addr & 0x80000000u) != 0u && (addr & 0x7FFFFFFFu) < PS2_SCRATCHPAD_SIZE)
+    {
+        return PS2_SCRATCHPAD_BASE + (addr & (PS2_SCRATCHPAD_SIZE - 1u));
+    }
+    return addr;
 }
 
 inline uint32_t ps2ScratchpadOffset(uint32_t addr)
@@ -275,6 +286,7 @@ public:
     // Memory access methods
     uint8_t *getRDRAM() { return m_rdram; }
     uint8_t *getScratchpad() { return m_scratchpad; }
+    Ps2Ipu &ipu() { return m_ipu; }
     uint8_t *getIOPRAM() { return iop_ram; }
     uint64_t dmaStartCount() const { return m_dmaStartCount.load(std::memory_order_relaxed); }
     uint64_t gifCopyCount() const { return m_gifCopyCount.load(std::memory_order_relaxed); }
@@ -450,7 +462,20 @@ public:
 
     std::array<EeTimer, 4> m_eeTimers{};
     bool tryProcessScratchpadDma(uint32_t channelBase, uint32_t chcr);
+    bool tryStartIpuDma(uint32_t channelBase, uint32_t chcr);
+    void serviceIpuDma();
+    bool appendDmaSource(uint32_t address, uint32_t bytes, std::vector<uint8_t> &out) const;
     void completeDmacChannel(uint32_t channelBase, uint32_t cause);
+    size_t pullToIpu(uint8_t *destination, size_t maxQuadwords);
+    bool processToScratchpadChain(uint32_t chcr);
+    // DMAC stall control (D_CTRL.STS/STD, D_STADR): sources advance D_STADR, drains park on REFS tags beyond it.
+    static constexpr uint32_t kStallSourceFromSpr = 2u;
+    static constexpr uint32_t kStallSourceFromIpu = 3u;
+    bool dmaStallBlocks(uint32_t channelBase, uint32_t dataAddr, uint32_t qwc);
+    void advanceDmaStallAddress(uint32_t sourceChannel, uint32_t physicalEnd);
+    uint32_t m_stalledDrainChannel = 0u;
+    Ps2Ipu m_ipu;
+    bool m_toIpuLastTag = false;
     void queueCompletedDmacCause(uint32_t cause);
 };
 

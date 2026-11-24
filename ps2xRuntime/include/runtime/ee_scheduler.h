@@ -267,6 +267,10 @@ public:
     static constexpr uint32_t kGeneratedCheckpointCycles = 32u;
     static constexpr uint32_t kGuestDispatchCycles = 8u;
     static constexpr uint64_t kDefaultTimeSliceCycles = 65536ull;
+    // Guest checkpoints arrive every few dozen cycles; running the IOP that often spent more time
+    // in its scheduler than in IRX code. One IOP time slice (256 IOP cycles) per batch keeps the
+    // processors within a few microseconds of each other.
+    static constexpr uint64_t kIopBatchEeCycles = 2048ull;
 
     explicit EeScheduler(PS2Runtime &runtime);
     ~EeScheduler();
@@ -279,6 +283,7 @@ public:
     void requestStop();
     void postEvent(EeEvent event);
     [[nodiscard]] bool checkpointDue(uint32_t cycles = kGeneratedCheckpointCycles) noexcept;
+    // Advances EE time and runs the IOP up to it immediately.
     void accountCycles(uint32_t cycles) noexcept;
     [[nodiscard]] bool isExecutingGuest() const noexcept;
 
@@ -370,6 +375,8 @@ private:
     };
 
     void assertExecutor() const;
+    void advanceGuestCycles(uint32_t cycles) noexcept;
+    void flushIopCycles() noexcept;
     [[nodiscard]] int allocateThreadId();
     GuestThread &acquireInvocationThread();
     void enqueueReady(GuestThread &thread, bool front = false);
@@ -426,6 +433,7 @@ private:
     bool m_insideInterrupt = false;
     uint32_t m_pendingEeTimerInterrupts = 0;
     uint64_t m_eeCycle = 0;
+    uint64_t m_iopPendingEeCycles = 0;
     uint64_t m_sliceEndCycle = kDefaultTimeSliceCycles;
     std::thread::id m_executorThread{};
     std::atomic<bool> m_running{false};

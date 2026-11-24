@@ -53,6 +53,8 @@ namespace ps2x::iop::detail
         void removeServersInRange(uint32_t base, uint32_t size);
 
         [[nodiscard]] bool hasServer(uint32_t sid) const noexcept;
+        // Priority of the thread that registered the server, or -1 if it was registered outside a thread.
+        [[nodiscard]] int serverPriority(uint32_t sid) const noexcept;
         [[nodiscard]] size_t serverCount() const noexcept { return m_servers.size(); }
 
     private:
@@ -66,6 +68,7 @@ namespace ps2x::iop::detail
             uint32_t callback = 0;
             uint32_t callbackBuffer = 0;
             uint32_t queue = 0;
+            int priority = -1;
         };
 
         IopHost &m_host;

@@ -826,11 +826,79 @@ inline __m128i ps2_u64_to_epi64_pair(uint64_t value)
     return _mm_set1_epi64x(static_cast<long long>(value));
 }
 
-#define PS2_PMFHL_LW(hi, lo) _mm_unpacklo_epi64(ps2_u64_to_epi64_pair(lo), ps2_u64_to_epi64_pair(hi))
-#define PS2_PMFHL_UW(hi, lo) _mm_unpackhi_epi64(ps2_u64_to_epi64_pair(lo), ps2_u64_to_epi64_pair(hi))
-#define PS2_PMFHL_SLW(hi, lo) _mm_packs_epi32(ps2_u64_to_epi64_pair(lo), ps2_u64_to_epi64_pair(hi))
-#define PS2_PMFHL_LH(hi, lo) _mm_shuffle_epi32(_mm_packs_epi32(ps2_u64_to_epi64_pair(lo), ps2_u64_to_epi64_pair(hi)), _MM_SHUFFLE(3, 1, 2, 0))
-#define PS2_PMFHL_SH(hi, lo) _mm_shufflehi_epi16(_mm_shufflelo_epi16(_mm_packs_epi32(ps2_u64_to_epi64_pair(lo), ps2_u64_to_epi64_pair(hi)), _MM_SHUFFLE(3, 1, 2, 0)), _MM_SHUFFLE(3, 1, 2, 0))
+// PMFHL/PMTHL see LO and HI as 128-bit registers: pipeline 0 in bits 0-63 (lo/hi) and pipeline 1 in
+// bits 64-127 (lo1/hi1). PMFHL.LW after MULTU is how EE code reads a full 64-bit product.
+inline int16_t ps2_saturate_s16(uint32_t word)
+{
+    const int32_t value = static_cast<int32_t>(word);
+    return static_cast<int16_t>(value > 0x7FFF ? 0x7FFF : (value < -0x8000 ? -0x8000 : value));
+}
+
+inline int64_t ps2_pmfhl_slw_lane(uint64_t hi, uint64_t lo)
+{
+    const int64_t value = static_cast<int64_t>((static_cast<uint64_t>(static_cast<uint32_t>(hi)) << 32) | static_cast<uint32_t>(lo));
+    if (value >= 0x7FFFFFFFll)
+        return 0x7FFFFFFFll;
+    if (value <= -0x80000000ll)
+        return -0x80000000ll;
+    return static_cast<int32_t>(lo);
+}
+
+template <typename Ctx>
+inline __m128i ps2_pmfhl(const Ctx *ctx, int mode)
+{
+    const uint64_t lanes[4] = {ctx->lo, ctx->hi, ctx->lo1, ctx->hi1};
+    switch (mode)
+    {
+    case 0: // LW
+        return _mm_set_epi32(static_cast<int>(static_cast<uint32_t>(lanes[3])), static_cast<int>(static_cast<uint32_t>(lanes[2])),
+                             static_cast<int>(static_cast<uint32_t>(lanes[1])), static_cast<int>(static_cast<uint32_t>(lanes[0])));
+    case 1: // UW
+        return _mm_set_epi32(static_cast<int>(lanes[3] >> 32), static_cast<int>(lanes[2] >> 32),
+                             static_cast<int>(lanes[1] >> 32), static_cast<int>(lanes[0] >> 32));
+    case 2: // SLW
+        return _mm_set_epi64x(ps2_pmfhl_slw_lane(ctx->hi1, ctx->lo1), ps2_pmfhl_slw_lane(ctx->hi, ctx->lo));
+    case 3: // LH: halfwords 0 and 2 of LO, HI, LO1, HI1
+    {
+        uint16_t h[8];
+        for (int i = 0; i < 4; ++i)
+        {
+            h[i * 2] = static_cast<uint16_t>(lanes[i]);
+            h[i * 2 + 1] = static_cast<uint16_t>(lanes[i] >> 32);
+        }
+        return _mm_set_epi16(static_cast<short>(h[7]), static_cast<short>(h[6]), static_cast<short>(h[5]), static_cast<short>(h[4]),
+                             static_cast<short>(h[3]), static_cast<short>(h[2]), static_cast<short>(h[1]), static_cast<short>(h[0]));
+    }
+    default: // SH: every 32-bit word of LO, HI, LO1, HI1 saturated to 16 bits
+    {
+        int16_t h[8];
+        for (int i = 0; i < 4; ++i)
+        {
+            h[i * 2] = ps2_saturate_s16(static_cast<uint32_t>(lanes[i]));
+            h[i * 2 + 1] = ps2_saturate_s16(static_cast<uint32_t>(lanes[i] >> 32));
+        }
+        return _mm_set_epi16(h[7], h[6], h[5], h[4], h[3], h[2], h[1], h[0]);
+    }
+    }
+}
+
+template <typename Ctx>
+inline void ps2_pmthl_lw(Ctx *ctx, __m128i value)
+{
+    alignas(16) uint32_t words[4];
+    _mm_store_si128(reinterpret_cast<__m128i *>(words), value);
+    ctx->lo = (ctx->lo & 0xFFFFFFFF00000000ull) | words[0];
+    ctx->hi = (ctx->hi & 0xFFFFFFFF00000000ull) | words[1];
+    ctx->lo1 = (ctx->lo1 & 0xFFFFFFFF00000000ull) | words[2];
+    ctx->hi1 = (ctx->hi1 & 0xFFFFFFFF00000000ull) | words[3];
+}
+
+#define PS2_PMFHL_LW(ctx) ps2_pmfhl(ctx, 0)
+#define PS2_PMFHL_UW(ctx) ps2_pmfhl(ctx, 1)
+#define PS2_PMFHL_SLW(ctx) ps2_pmfhl(ctx, 2)
+#define PS2_PMFHL_LH(ctx) ps2_pmfhl(ctx, 3)
+#define PS2_PMFHL_SH(ctx) ps2_pmfhl(ctx, 4)
+#define PS2_PMTHL_LW(ctx, value) ps2_pmthl_lw(ctx, value)
 
 // FPU (COP1) operations
 #define FPU_SET_ACC(ctx, res) (ctx->f_acc = res)

@@ -57,6 +57,7 @@ namespace ps2_stubs
     void sceCdInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceCdInitEeCB(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceCdIntToPos(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void sceCdLayerSearchFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceCdMmode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceCdNcmdDiskReady(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceCdPause(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);

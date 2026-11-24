@@ -7,6 +7,7 @@
 #include "ps2x/iop/ps2_path.h"
 
 #include <algorithm>
+#include <ctime>
 #include <array>
 #include <cctype>
 #include <cstring>
@@ -280,6 +281,10 @@ namespace ps2x::iop::detail
                 cpu.gpr[2] = kCdvdReadyComplete;
                 return true;
 
+            case 24: // sceCdReadClock
+                cpu.gpr[2] = readClock(a0) ? 1u : 0u;
+                return true;
+
             case 28: // sceCdStatus
                 cpu.gpr[2] = kCdvdStatusPause;
                 return true;
@@ -356,6 +361,32 @@ namespace ps2x::iop::detail
         }
 
     private:
+        // sceCdCLOCK: status, then BCD second, minute, hour, a pad byte, day, month and two-digit year. Memory
+        // card drivers stamp saved files with it, so an unanswered call leaves garbage dates on the card.
+        bool readClock(uint32_t address)
+        {
+            const std::time_t now = std::time(nullptr);
+            std::tm local{};
+#ifdef _WIN32
+            localtime_s(&local, &now);
+#else
+            localtime_r(&now, &local);
+#endif
+            const auto bcd = [](int value)
+            { return static_cast<uint8_t>(((value / 10) << 4) | (value % 10)); };
+            const uint8_t clock[8] = {
+                0u,
+                bcd(local.tm_sec),
+                bcd(local.tm_min),
+                bcd(local.tm_hour),
+                0u,
+                bcd(local.tm_mday),
+                bcd(local.tm_mon + 1),
+                bcd((local.tm_year + 1900) % 100),
+            };
+            return address != 0u && memory.writeRam(address, clock, sizeof(clock));
+        }
+
         int ensureInterruptEventFlag()
         {
             if (interruptEventFlagId == 0)

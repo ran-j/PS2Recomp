@@ -29,8 +29,8 @@ namespace ps2x::iop::detail
         uint32_t size = 0;
         uint32_t entry = 0;
         uint32_t gp = 0;
-        uint32_t nextModuleCursor = 0;
         bool relocationsComplete = true;
+        bool reserved = false; // base..base+size is an IopMemory allocation the caller frees on unload
 
         [[nodiscard]] explicit operator bool() const noexcept
         {
@@ -43,6 +43,14 @@ namespace ps2x::iop::detail
     public:
         [[nodiscard]] static bool readWholeHostFile(IopHost &host, std::string_view guestPath, std::vector<uint8_t> &bytes);
         [[nodiscard]] static bool readElfFromGuest(IopHost &host, uint32_t guestAddress, std::vector<uint8_t> &bytes);
-        [[nodiscard]] static IopImageLoadResult load(std::span<const uint8_t> image, IopMemory &memory, uint32_t moduleCursor);
+        [[nodiscard]] static bool readElfFromIopRam(const IopMemory &memory, uint32_t iopAddress, std::vector<uint8_t> &bytes);
+        [[nodiscard]] static IopImageLoadResult load(std::span<const uint8_t> image, IopMemory &memory);
+        // Lays out the (argc, argv) a module entry receives, as loadcore does: argv[0] is the module
+        // name, then each NUL-terminated string of the SIF argument block, then a NULL terminator.
+        // The block is meant to be copied to IOP address `base`; argv pointers are absolute.
+        [[nodiscard]] static std::vector<uint8_t> buildStartArguments(std::string_view moduleName,
+                                                                      std::span<const uint8_t> arguments,
+                                                                      uint32_t base,
+                                                                      uint32_t &argc);
     };
 }

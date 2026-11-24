@@ -8,6 +8,15 @@
 namespace ps2_stubs
 {
     void PadSyncCallback(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void scePad2CreateSocket(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void scePad2DeleteSocket(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void scePad2End(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void scePad2GetButtonProfile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void scePad2GetState(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void scePad2Init(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void scePad2Read(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void sceVibGetProfile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void sceVibSetActParam(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void scePadEnd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void scePadEnterPressMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void scePadExitPressMode(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);

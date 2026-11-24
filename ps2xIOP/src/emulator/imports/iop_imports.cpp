@@ -43,6 +43,18 @@ namespace ps2x::iop::detail
     void IopImportRegistry::reset()
     {
         m_libraries.clear();
+        m_decodedStubs.clear();
+    }
+
+    void IopImportRegistry::forgetDecodedStubs() noexcept
+    {
+        m_decodedStubs.clear();
+    }
+
+    uint64_t IopImportRegistry::readLibraryName(uint32_t table) const
+    {
+        return static_cast<uint64_t>(m_memory.read32(table + 12u)) |
+               (static_cast<uint64_t>(m_memory.read32(table + 16u)) << 32u);
     }
 
     std::optional<IopImportCall> IopImportRegistry::decode(uint32_t pc) const
@@ -54,6 +66,23 @@ namespace ps2x::iop::detail
             return std::nullopt;
 
         const uint32_t physicalPc = IopMemory::physicalAddress(pc);
+        if (const auto cached = m_decodedStubs.find(physicalPc); cached != m_decodedStubs.end())
+        {
+            // A module unloaded or overwritten in place no longer carries the same table header.
+            const DecodedStub &stub = cached->second;
+            if (stub.call.ordinal == static_cast<uint16_t>(delay & 0xFFFFu) &&
+                m_memory.read32(stub.table) == kImportMagic &&
+                m_memory.read16(stub.table + 8u) == stub.call.version &&
+                readLibraryName(stub.table) == stub.name)
+                return stub.call;
+            m_decodedStubs.erase(cached);
+        }
+
+        return scanImportTable(physicalPc, delay);
+    }
+
+    std::optional<IopImportCall> IopImportRegistry::scanImportTable(uint32_t physicalPc, uint32_t delay) const
+    {
         const uint32_t searchBegin = physicalPc > 0x10000u ? physicalPc - 0x10000u : 0u;
         for (uint32_t candidate = physicalPc & ~3u; candidate >= searchBegin + 20u; candidate -= 4u)
         {
@@ -89,11 +118,14 @@ namespace ps2x::iop::detail
             }
             if (valid)
             {
-                return IopImportCall{
+                IopImportCall call{
                     trimLibraryName(name),
                     static_cast<uint16_t>(delay & 0xFFFFu),
                     m_memory.read16(table + 8u),
                 };
+                if (physicalPc + 8u <= IopMemory::RamSize)
+                    m_decodedStubs[physicalPc] = DecodedStub{table, readLibraryName(table), call};
+                return call;
             }
         }
         return std::nullopt;
@@ -184,6 +216,7 @@ namespace ps2x::iop::detail
 
     void IopImportRegistry::eraseRange(uint32_t base, uint32_t size)
     {
+        m_decodedStubs.clear();
         for (auto library = m_libraries.begin(); library != m_libraries.end();)
         {
             if (library->first >= base && library->first < base + size)

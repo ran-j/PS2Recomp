@@ -164,6 +164,11 @@ namespace ps2x::iop
         return true;
     }
 
+    int32_t IopSubsystem::findModuleByAddress(uint32_t iopAddress) const noexcept
+    {
+        return m_impl->emulator.findModuleByAddress(iopAddress);
+    }
+
     void IopSubsystem::runEeCycles(uint64_t eeCycles) noexcept
     {
         m_impl->emulator.runEeCycles(eeCycles);

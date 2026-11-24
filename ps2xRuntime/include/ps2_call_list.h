@@ -298,6 +298,7 @@
     X(sceCdInit)                              \
     X(sceCdInitEeCB)                          \
     X(sceCdIntToPos)                          \
+    X(sceCdLayerSearchFile)                   \
     X(sceCdMmode)                             \
     X(sceCdNcmdDiskReady)                     \
     X(sceCdPause)                             \
@@ -464,6 +465,13 @@
     X(sceMpegSetDefaultPtsGap)                \
     X(sceMpegSetImageBuff)                    \
     X(sceOpen)                                \
+    X(scePad2CreateSocket)                    \
+    X(scePad2DeleteSocket)                    \
+    X(scePad2End)                             \
+    X(scePad2GetButtonProfile)                \
+    X(scePad2GetState)                        \
+    X(scePad2Init)                            \
+    X(scePad2Read)                            \
     X(scePadEnd)                              \
     X(scePadEnterPressMode)                   \
     X(scePadExitPressMode)                    \
@@ -549,6 +557,7 @@
     X(sceSifRemoveRpcQueue)                   \
     X(sceSifResetIop)                         \
     X(sceSifRpcLoop)                          \
+    X(sceSifSearchModuleByAddress)            \
     X(sceSifSetCmdBuffer)                     \
     X(sceSifSetDChain)                        \
     X(sceSifSetDma)                           \
@@ -642,6 +651,8 @@
     X(sceTtyRead)                             \
     X(sceTtyWrite)                            \
     X(sceVpu0Reset)                           \
+    X(sceVibGetProfile)                       \
+    X(sceVibSetActParam)                      \
     X(sceVu0AddVector)                        \
     X(sceVu0ApplyMatrix)                      \
     X(sceVu0CameraMatrix)                     \

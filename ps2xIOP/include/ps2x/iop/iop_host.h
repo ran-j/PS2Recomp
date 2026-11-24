@@ -96,6 +96,13 @@ namespace ps2x::iop
 
         virtual void audioCommand(uint32_t sid, uint32_t function, GuestBuffer send, GuestBuffer receive) = 0;
 
+        // Mixed SPU2 output: interleaved stereo 16-bit frames at 48 kHz, produced in emulated time.
+        virtual void audioOutput(const int16_t *samples, size_t frames)
+        {
+            (void)samples;
+            (void)frames;
+        }
+
         virtual std::string hostPath(HostPathKind kind) const = 0;
         virtual std::string translateGuestPath(std::string_view path) const = 0;
         virtual uint64_t openHostFile(std::string_view path) = 0;

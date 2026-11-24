@@ -727,6 +727,72 @@ void register_ps2_runtime_kernel_tests()
                      "the resumed waiter should re-enter its priority queue once");
         });
 
+        tc.Run("SetupThread keeps async callback stacks out of a top-of-RAM main stack", [](TestCase &t)
+        {
+            TestEnv env;
+            EeScheduler &ee = env.runtime.eeScheduler();
+            ee.reset(env.rdram.data(), env.ctx);
+            ee.bindMainContextForSyscall(env.ctx, env.rdram.data());
+
+            // Mana Khemia's crt0: SetupThread(gp, 0x01FC0000, 0x40000, ...).
+            constexpr uint32_t kStack = 0x01FC0000u;
+            setRegU32(env.ctx, 4, 0x00BAE3F0u);
+            setRegU32(env.ctx, 5, kStack);
+            setRegU32(env.ctx, 6, 0x40000u);
+            ps2_syscalls::SetupThread(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)), PS2_RAM_SIZE,
+                     "SetupThread should still return the top of the requested stack");
+
+            const uint32_t callbackTop = env.runtime.reserveAsyncCallbackStack(0x4000u, 16u);
+            t.IsTrue(callbackTop != 0u && callbackTop <= kStack,
+                     "callback stacks must be carved below the main thread stack");
+        });
+
+        tc.Run("ChangeThreadPriority returns the previous priority", [](TestCase &t)
+        {
+            TestEnv env;
+            EeScheduler &ee = env.runtime.eeScheduler();
+            ee.reset(env.rdram.data(), env.ctx);
+            ee.bindMainContextForSyscall(env.ctx, env.rdram.data());
+
+            // CRI ADX locks with old = ChangeThreadPriority(self, 1) and unlocks with ChangeThreadPriority(self, old).
+            const int id = ee.createThread(EeThreadCreateParams{0u, K_SCHED_HIGH, 0x24000u, 0x800u, 0u, 20, 0u});
+            ee.startThread(id, 0u, env.ctx, false);
+            setRegU32(env.ctx, 4, static_cast<uint32_t>(id));
+            setRegU32(env.ctx, 5, 30u);
+            ps2_syscalls::ChangeThreadPriority(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), 20, "ChangeThreadPriority should return the priority it replaced");
+            setRegU32(env.ctx, 4, static_cast<uint32_t>(id));
+            setRegU32(env.ctx, 5, 25u);
+            ps2_syscalls::ChangeThreadPriority(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), 30, "a second change should return the first change's priority");
+            t.Equals(ee.thread(id)->currentPriority, 25, "the new priority should still be applied");
+            setRegU32(env.ctx, 4, 0x7FFFu);
+            setRegU32(env.ctx, 5, 25u);
+            ps2_syscalls::ChangeThreadPriority(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), KE_UNKNOWN_THID, "an unknown thread should still return an error code");
+        });
+
+        tc.Run("SuspendThread and ResumeThread return the thread id on success", [](TestCase &t)
+        {
+            TestEnv env;
+            EeScheduler &ee = env.runtime.eeScheduler();
+            ee.reset(env.rdram.data(), env.ctx);
+            ee.bindMainContextForSyscall(env.ctx, env.rdram.data());
+
+            const int id = ee.createThread(EeThreadCreateParams{0u, K_SCHED_HIGH, 0x24000u, 0x800u, 0u, 40, 0u});
+            ee.startThread(id, 0u, env.ctx, false);
+            setRegU32(env.ctx, 4, static_cast<uint32_t>(id));
+            ps2_syscalls::SuspendThread(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), id, "SuspendThread should return the suspended thread's id");
+            setRegU32(env.ctx, 4, static_cast<uint32_t>(id));
+            ps2_syscalls::ResumeThread(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), id, "ResumeThread should return the resumed thread's id");
+            setRegU32(env.ctx, 4, static_cast<uint32_t>(id));
+            ps2_syscalls::ResumeThread(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), -415, "resuming a running thread should still report KE_NOT_SUSPEND");
+        });
+
         tc.Run("semaphore signal, delete, and release complete blocked contexts with exact results", [](TestCase &t)
         {
             const auto blockMain = [](TestEnv &env, int &semaId)

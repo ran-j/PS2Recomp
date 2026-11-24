@@ -9,6 +9,7 @@
 #include <utility>
 #include <vector>
 #include <cstring>
+#include <cstdlib>
 #include <chrono>
 
 using namespace ps2_syscalls;
@@ -168,6 +169,21 @@ void register_ps2_runtime_io_tests()
 {
     MiniTest::Case("PS2RuntimeIO", [](TestCase &tc)
     {
+#if AGRESSIVE_LOGS
+        tc.Run("Generated-function call tracing is opt-in", [](TestCase &t)
+        {
+            if (std::getenv("PS2X_TRACE_CALLS") != nullptr)
+                return;
+            t.IsFalse(ps2_log::trace_calls_enabled(), "call tracing must stay off without PS2X_TRACE_CALLS");
+            const int before = ps2_log::depth();
+            {
+                PS_LOG_ENTRY("trace_probe");
+                t.Equals(ps2_log::depth(), before, "a disabled trace must not track call depth");
+            }
+            t.Equals(ps2_log::depth(), before, "a disabled trace must not unwind call depth");
+        });
+#endif
+
         tc.Run("ROM0 ROMVER is exposed as the 14-byte firmware pseudo-file", [](TestCase &t)
         {
             TestContext test;
@@ -707,6 +723,32 @@ void register_ps2_runtime_io_tests()
                      "sceCdSearchFile should assign a pseudo LSN for the resolved host file");
         });
 
+        tc.Run("sceCdLayerSearchFile resolves host files regardless of layer", [](TestCase &t)
+        {
+            TestContext test;
+
+            std::filesystem::create_directories(test.paths.cdRoot / "modules");
+            {
+                std::ofstream out(test.paths.cdRoot / "modules" / "ioprp310.img", std::ios::binary);
+                const std::string payload = "romdir";
+                out.write(payload.data(), static_cast<std::streamsize>(payload.size()));
+            }
+
+            constexpr uint32_t fileAddr = GUEST_BUFFER_AREA_START + 0x1B00;
+            constexpr uint32_t pathAddr = GUEST_STRING_AREA_START + 0xB00;
+            writeGuestString(test.rdram.data(), pathAddr, "\\MODULES\\IOPRP310.IMG;1");
+
+            clearContext(test.ctx);
+            setRegU32(test.ctx, 4, fileAddr);
+            setRegU32(test.ctx, 5, pathAddr);
+            setRegU32(test.ctx, 6, 1u); // second layer
+            ps2_stubs::sceCdLayerSearchFile(test.rdram.data(), &test.ctx, nullptr);
+
+            t.Equals(getRegS32(&test.ctx, 2), 1, "sceCdLayerSearchFile should resolve the extracted file");
+            t.Equals(readGuestU32(test.rdram.data(), fileAddr + 4), 6u,
+                     "sceCdLayerSearchFile should report the host file size");
+        });
+
         tc.Run("sceCdRead reads from explicit cdImage path", [](TestCase &t)
         {
             TestContext test;
@@ -741,6 +783,48 @@ void register_ps2_runtime_io_tests()
             t.Equals(getRegS32(&test.ctx, 2), 1, "sceCdRead should succeed when cdImage is configured");
             t.Equals(std::memcmp(test.rdram.data() + bufAddr, "cd-image", 8), 0,
                      "sceCdRead should copy sector data from the configured image");
+        });
+
+        tc.Run("sceCdReadIOPm writes sectors into IOP RAM and leaves EE RAM alone", [](TestCase &t)
+        {
+            TestContext test;
+            PS2Runtime runtime;
+
+            constexpr uint32_t kSectorSize = 2048u;
+            const std::filesystem::path imagePath = test.paths.base / "disc.iso";
+            {
+                std::vector<uint8_t> sector(kSectorSize, 0);
+                const char payload[] = "iop-read";
+                std::memcpy(sector.data(), payload, sizeof(payload) - 1);
+                std::ofstream out(imagePath, std::ios::binary);
+                out.write(reinterpret_cast<const char *>(sector.data()), static_cast<std::streamsize>(sector.size()));
+            }
+
+            PS2Runtime::IoPaths ioPaths;
+            ioPaths.elfDirectory = test.paths.cdRoot;
+            ioPaths.hostRoot = test.paths.cdRoot;
+            ioPaths.cdRoot = test.paths.cdRoot;
+            ioPaths.mcRoot = test.paths.mcRoot;
+            ioPaths.cdImage = imagePath;
+            PS2Runtime::setIoPaths(ioPaths);
+
+            const uint32_t iopBuffer = runtime.allocateIopMemory(kSectorSize, 64u);
+            t.IsTrue(iopBuffer != 0u, "the test needs an IOP buffer");
+            std::memset(test.rdram.data() + iopBuffer, 0x5A, 8u);
+
+            clearContext(test.ctx);
+            setRegU32(test.ctx, 4, 0u);
+            setRegU32(test.ctx, 5, 1u);
+            setRegU32(test.ctx, 6, iopBuffer);
+            ps2_stubs::sceCdReadIOPm(test.rdram.data(), &test.ctx, &runtime);
+
+            char iopBytes[8] = {};
+            t.Equals(getRegS32(&test.ctx, 2), 1, "sceCdReadIOPm should accept the read");
+            t.IsTrue(runtime.readIopMemory(iopBuffer, iopBytes, sizeof(iopBytes)) &&
+                         std::memcmp(iopBytes, "iop-read", 8) == 0,
+                     "sceCdReadIOPm should copy sector data into IOP RAM");
+            t.Equals(test.rdram[iopBuffer], static_cast<uint8_t>(0x5Au),
+                     "sceCdReadIOPm must not write the IOP address into EE RAM");
         });
     });
 }

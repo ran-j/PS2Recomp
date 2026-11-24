@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <cmath>
 #include <vector>
 
 namespace
@@ -153,6 +154,34 @@ namespace
         appendU64(packet, 0u);
     }
 
+}
+
+namespace
+{
+    // Packs {value, bitCount} fields MSB-first and pads to whole quadwords, as the IPU consumes them.
+    std::vector<uint8_t> packIpuBits(const std::vector<std::pair<uint32_t, uint32_t>> &fields)
+    {
+        std::vector<uint8_t> out;
+        uint32_t accumulator = 0u;
+        uint32_t bits = 0u;
+        for (const auto &[value, count] : fields)
+        {
+            for (uint32_t i = count; i-- > 0u;)
+            {
+                accumulator = (accumulator << 1u) | ((value >> i) & 1u);
+                if (++bits == 8u)
+                {
+                    out.push_back(static_cast<uint8_t>(accumulator));
+                    accumulator = 0u;
+                    bits = 0u;
+                }
+            }
+        }
+        if (bits != 0u)
+            out.push_back(static_cast<uint8_t>(accumulator << (8u - bits)));
+        out.resize((out.size() + 31u) / 16u * 16u, 0u);
+        return out;
+    }
 }
 
 void register_ps2_memory_tests()
@@ -1144,6 +1173,539 @@ void register_ps2_memory_tests()
             t.IsTrue(contentOk, "scratchpad alias chain payload should match scratchpad bytes");
         });
 
+        tc.Run("GIF DMA chain follows SPR-flagged tag and data addresses into scratchpad", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kGifCh = 0x1000A000u;
+            constexpr uint32_t kSprFlag = 0x80000000u;
+
+            // Hardware form: bit 31 selects scratchpad, low bits are the offset (Mana Khemia builds GIF packets there).
+            uint8_t *scratch = mem.getScratchpad();
+            uint8_t *rdram = mem.getRDRAM();
+            std::memset(rdram, 0, 0x400u);
+            // makeDmaTag masks bit 31, so build the REFE tag (qwc=1, id=0) with the SPR flag directly.
+            const uint64_t refeTag = 1ull | (static_cast<uint64_t>(kSprFlag | 0x200u) << 32);
+            std::memcpy(scratch + 0x100u, &refeTag, sizeof(refeTag));
+            for (uint32_t i = 0; i < 16u; ++i)
+            {
+                scratch[0x200u + i] = static_cast<uint8_t>(0x90u + i);
+            }
+
+            std::vector<std::vector<uint8_t>> captured;
+            mem.setGifPacketCallback([&](const uint8_t *data, uint32_t sizeBytes)
+            {
+                captured.emplace_back(data, data + sizeBytes);
+            });
+
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x30u, kSprFlag | 0x100u), "write SPR-flagged TADR should succeed");
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x00u, 0x104u), "write CHCR STR|CHAIN should succeed");
+            mem.processPendingTransfers();
+
+            t.Equals(captured.size(), static_cast<size_t>(1u), "SPR-flagged chain should emit one packet");
+            t.IsTrue(!captured.empty() && captured[0].size() == 16u &&
+                         std::memcmp(captured[0].data(), scratch + 0x200u, 16u) == 0,
+                     "SPR-flagged REFE data should come from scratchpad, not RDRAM");
+        });
+
+        tc.Run("GIF REFS tags wait for D_STADR under DMAC stall control", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kGifCh = 0x1000A000u;
+            constexpr uint32_t kFromSpr = 0x1000D000u;
+            constexpr uint32_t kChain = 0x00030000u;
+            constexpr uint32_t kBuffer = 0x00031000u;
+            uint8_t *rdram = mem.getRDRAM();
+            uint8_t *scratch = mem.getScratchpad();
+            std::memset(rdram + kBuffer, 0, 16u);
+            for (uint32_t i = 0; i < 16u; ++i)
+                scratch[0x400u + i] = static_cast<uint8_t>(0xA0u + i);
+
+            // Sofdec queues the whole frame's GIF chain first; fromSPR fills each REFS block afterwards.
+            const uint64_t refsTag = 1ull | (4ull << 28) | (static_cast<uint64_t>(kBuffer) << 32);
+            const uint64_t endTag = (7ull << 28);
+            std::memcpy(rdram + kChain, &refsTag, sizeof(refsTag));
+            std::memcpy(rdram + kChain + 16u, &endTag, sizeof(endTag));
+
+            std::vector<std::vector<uint8_t>> captured;
+            mem.setGifPacketCallback([&](const uint8_t *data, uint32_t sizeBytes)
+                                     { captured.emplace_back(data, data + sizeBytes); });
+
+            mem.writeIORegister(0x1000E000u, 1u | (2u << 4) | (2u << 6)); // DMAE, STS=fromSPR, STD=GIF
+            mem.writeIORegister(0x1000E020u, kBuffer);                    // D_STADR: nothing written yet
+            mem.writeIORegister(kGifCh + 0x30u, kChain);
+            mem.writeIORegister(kGifCh + 0x00u, 0x105u);
+            mem.processPendingTransfers();
+            t.IsTrue(captured.empty(), "GIF should not read the REFS block before the source writes it");
+            t.IsTrue((mem.readIORegister(kGifCh) & 0x100u) != 0u, "GIF should stay busy while stalled");
+
+            mem.writeIORegister(kFromSpr + 0x10u, kBuffer);
+            mem.writeIORegister(kFromSpr + 0x80u, 0x400u);
+            mem.writeIORegister(kFromSpr + 0x20u, 1u);
+            mem.writeIORegister(kFromSpr + 0x00u, 0x100u);
+            mem.processPendingTransfers();
+            t.Equals(captured.size(), static_cast<size_t>(1u), "advancing D_STADR should release the stalled REFS block");
+            t.IsTrue(!captured.empty() && captured[0].size() == 16u && captured[0][0] == 0xA0u,
+                     "the released block should carry the data fromSPR wrote");
+            t.Equals(mem.readIORegister(kGifCh) & 0x100u, 0u, "GIF should complete after the END tag");
+        });
+
+        tc.Run("IPU FDEC peeks and advances the bitstream fed by toIPU DMA", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kToIpu = 0x1000B400u;
+            constexpr uint32_t kSrc = 0x00030000u;
+            uint8_t *rdram = mem.getRDRAM();
+            const uint8_t stream[16] = {0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0};
+            std::memcpy(rdram + kSrc, stream, sizeof(stream));
+
+            mem.writeIORegister(kToIpu + 0x10u, kSrc);
+            mem.writeIORegister(kToIpu + 0x20u, 1u);
+            mem.writeIORegister(kToIpu + 0x00u, 0x101u);
+            t.IsTrue((mem.readIORegister(kToIpu) & 0x100u) == 0u, "toIPU should finish once its data is queued");
+
+            mem.writeIORegister(Ps2Ipu::kRegCmd, 0x40000000u); // FDEC, FB=0
+            t.Equals(mem.readIORegister(Ps2Ipu::kRegCmd), 0x12345678u, "FDEC 0 should peek the first 32 bits");
+            mem.writeIORegister(Ps2Ipu::kRegCmd, 0x40000008u); // FDEC, FB=8
+            t.Equals(mem.readIORegister(Ps2Ipu::kRegCmd), 0x3456789Au, "FDEC 8 should advance one byte before peeking");
+            t.Equals(mem.readIORegister(Ps2Ipu::kRegCmd + 4u) & 0x80000000u, 0u, "FDEC should not stay busy");
+        });
+
+        tc.Run("toSPR source chain gathers ref-tagged blocks into scratchpad", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kToSpr = 0x1000D400u;
+            constexpr uint32_t kTags = 0x00050000u;
+            constexpr uint32_t kRowA = 0x00060000u;
+            constexpr uint32_t kRowB = 0x00061000u;
+            uint8_t *rdram = mem.getRDRAM();
+            std::memset(rdram + kRowA, 0xAA, 32);
+            std::memset(rdram + kRowB, 0xBB, 16);
+            // libmpeg's _getRef0 fetches reference rows with ref tags and closes the list with refe.
+            const uint64_t tags[4] = {
+                (3ull << 28) | 2u | (static_cast<uint64_t>(kRowA) << 32), 0u, // ref, 2 qw
+                (0ull << 28) | 1u | (static_cast<uint64_t>(kRowB) << 32), 0u, // refe, 1 qw
+            };
+            std::memcpy(rdram + kTags, tags, sizeof(tags));
+
+            mem.writeIORegister(kToSpr + 0x30u, kTags);
+            mem.writeIORegister(kToSpr + 0x80u, 0x100u);
+            mem.writeIORegister(kToSpr + 0x20u, 0u);
+            mem.writeIORegister(kToSpr + 0x00u, 0x105u);
+
+            t.Equals(mem.readIORegister(kToSpr) & 0x100u, 0u, "the chain should complete");
+            t.Equals(mem.read8(0x70000100u), static_cast<uint8_t>(0xAA), "the first ref block should land at SADR");
+            t.Equals(mem.read8(0x7000011Fu), static_cast<uint8_t>(0xAA), "both quadwords of the first block should arrive");
+            t.Equals(mem.read8(0x70000120u), static_cast<uint8_t>(0xBB), "the refe block should follow contiguously");
+            t.Equals(mem.readIORegister(kToSpr + 0x80u), 0x130u, "SADR should advance by the transferred quadwords");
+        });
+
+        tc.Run("IPU stays BUSY until its output fits in the OUT FIFO", [](TestCase &t)
+        {
+            // CSC of one macroblock produces 64 quadwords of RGB32; callers start the GS upload once BUSY clears.
+            std::vector<std::pair<uint32_t, uint32_t>> fields;
+            for (int i = 0; i < 384; ++i)
+                fields.push_back({0x80u, 8u});
+            const std::vector<uint8_t> stream = packIpuBits(fields);
+            Ps2Ipu ipu;
+            ipu.feedDmaInput(stream.data(), stream.size());
+            ipu.writeRegister(Ps2Ipu::kRegCmd, 0x70000001u); // CSC, one macroblock, RGB32
+            t.IsTrue((ipu.readRegister(Ps2Ipu::kRegCtrl) & 0x80000000u) != 0u, "CSC should be busy while output is pending");
+            ipu.advance(1u << 20);
+            std::vector<uint8_t> out(1024u - 128u);
+            ipu.takeOutput(out.data(), out.size());
+            t.Equals(ipu.readRegister(Ps2Ipu::kRegCtrl) & 0x80000000u, 0u, "BUSY should clear once 8 quadwords remain");
+        });
+
+        tc.Run("IPU_CTRL.OFC counts only output that OUT_FIFO reads can return", [](TestCase &t)
+        {
+            // Sofdec drains CSC output with lq from OUT_FIFO after checking OFC; a count ahead of the data reads zeros.
+            std::vector<std::pair<uint32_t, uint32_t>> fields;
+            for (int i = 0; i < 384; ++i)
+                fields.push_back({0x80u, 8u});
+            const std::vector<uint8_t> stream = packIpuBits(fields);
+            Ps2Ipu ipu;
+            ipu.feedDmaInput(stream.data(), stream.size());
+            ipu.writeRegister(Ps2Ipu::kRegCmd, 0x70000001u); // CSC, one macroblock, RGB32
+            const uint32_t ofc = (ipu.readRegister(Ps2Ipu::kRegCtrl) >> 4u) & 0xFu;
+            uint8_t quadword[16] = {};
+            for (uint32_t i = 0; i < ofc; ++i)
+                t.IsTrue(ipu.readOutputFifo(quadword), "every quadword OFC promises should be readable");
+            ipu.advance(1u << 20);
+            t.Equals((ipu.readRegister(Ps2Ipu::kRegCtrl) >> 4u) & 0xFu, 8u, "released output should fill OFC");
+            t.IsTrue(ipu.readOutputFifo(quadword) && quadword[0] != 0u, "the read should return converted pixels");
+        });
+
+        tc.Run("IPU_CTRL reset is a strobe that reads back clear", [](TestCase &t)
+        {
+            Ps2Ipu ipu;
+            ipu.writeRegister(Ps2Ipu::kRegCtrl, 0x40000000u | (1u << 23)); // RST + MP1
+            t.Equals(ipu.readRegister(Ps2Ipu::kRegCtrl) & 0x40000000u, 0u, "RST should not read back");
+            t.IsTrue((ipu.readRegister(Ps2Ipu::kRegCtrl) & (1u << 23)) != 0u, "MP1 should be kept");
+
+            const std::vector<uint8_t> stream = packIpuBits({{0xABCDEF01u, 32u}});
+            ipu.feedDmaInput(stream.data(), stream.size());
+            // libmpeg updates PCT with a read-modify-write; that must not wipe the input FIFO.
+            ipu.writeRegister(Ps2Ipu::kRegCtrl, ipu.readRegister(Ps2Ipu::kRegCtrl) | (2u << 24));
+            ipu.writeRegister(Ps2Ipu::kRegCmd, 0x40000000u);
+            t.Equals(ipu.readRegister(Ps2Ipu::kRegCmd), 0xABCDEF01u, "the FIFO should survive a CTRL update");
+        });
+
+        tc.Run("toIPU DMA advances only as the IPU input FIFO drains", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kToIpu = 0x1000B400u;
+            constexpr uint32_t kSrc = 0x00040000u;
+            uint8_t *rdram = mem.getRDRAM();
+            for (uint32_t i = 0; i < 32u * 16u; ++i)
+                rdram[kSrc + i] = static_cast<uint8_t>(i / 16u); // each quadword holds its index
+
+            mem.writeIORegister(kToIpu + 0x10u, kSrc);
+            mem.writeIORegister(kToIpu + 0x20u, 32u);
+            mem.writeIORegister(kToIpu + 0x00u, 0x101u);
+            // sceIpuStopDMA rewinds MADR by the FIFO count, so the channel must not run ahead of the FIFO.
+            t.IsTrue((mem.readIORegister(kToIpu) & 0x100u) != 0u, "toIPU should stay busy while the FIFO is full");
+            t.Equals(mem.readIORegister(kToIpu + 0x20u) & 0xFFFFu, 24u, "only eight quadwords should have moved");
+            t.Equals(mem.readIORegister(kToIpu + 0x10u), kSrc + 8u * 16u, "MADR should follow the moved quadwords");
+            t.Equals((mem.readIORegister(Ps2Ipu::kRegCtrl) & 0xFu), 8u, "IPU_CTRL.IFC should report a full FIFO");
+
+            mem.writeIORegister(Ps2Ipu::kRegCmd, 0x40000000u | 32u); // FDEC 32 drains no whole quadword yet
+            mem.writeIORegister(Ps2Ipu::kRegCmd, 0x40000000u | 32u);
+            mem.writeIORegister(Ps2Ipu::kRegCmd, 0x40000000u | 32u);
+            mem.writeIORegister(Ps2Ipu::kRegCmd, 0x40000000u | 32u); // 128 bits: quadword 0 consumed
+            t.Equals(mem.readIORegister(Ps2Ipu::kRegCmd) >> 24u, 1u, "the stream should now read from quadword 1");
+            t.Equals(mem.readIORegister(kToIpu + 0x20u) & 0xFFFFu, 23u, "draining one quadword should pull exactly one more");
+        });
+
+        tc.Run("64-bit reads of IPU_CMD return the command result and BUSY", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            const std::vector<uint8_t> stream = packIpuBits({{0x000001B3u, 32u}});
+            mem.ipu().feedDmaInput(stream.data(), stream.size());
+            mem.write32(Ps2Ipu::kRegCmd, 0x40000000u); // FDEC 0
+            // libmpeg's _sceMpegWaitIpuIdle64 reads the result with ld and checks bit 63 for BUSY.
+            t.Equals(mem.read64(Ps2Ipu::kRegCmd), static_cast<uint64_t>(0x000001B3u), "ld IPU_CMD should return DATA with BUSY clear");
+            t.Equals(mem.read64(Ps2Ipu::kRegTop), static_cast<uint64_t>(0x000001B3u), "ld IPU_TOP should return BSTOP");
+        });
+
+        tc.Run("IPU VDEC reports each VLC symbol with its code length", [](TestCase &t)
+        {
+            // MBAI 2 '011', P macroblock_type forward-only '001', motion_code -3 '0001'+'1', dmvector -1 '11'.
+            const std::vector<uint8_t> stream = packIpuBits({{0x3u, 3u}, {0x1u, 3u}, {0x1u, 4u}, {0x1u, 1u}, {0x3u, 2u}});
+            Ps2Ipu ipu;
+            ipu.writeRegister(Ps2Ipu::kRegCtrl, 2u << 24); // PCT = P picture
+            ipu.feedDmaInput(stream.data(), stream.size());
+
+            ipu.writeRegister(Ps2Ipu::kRegCmd, 0x30000000u); // VDEC TBL=0
+            t.Equals(ipu.readRegister(Ps2Ipu::kRegCmd), 0x00030002u, "MBAI should decode 2 from a 3-bit code");
+            ipu.writeRegister(Ps2Ipu::kRegCmd, 0x34000000u); // VDEC TBL=1
+            t.Equals(ipu.readRegister(Ps2Ipu::kRegCmd), 0x00030008u, "a P macroblock '001' is forward motion, not coded");
+            ipu.writeRegister(Ps2Ipu::kRegCmd, 0x38000000u); // VDEC TBL=2
+            t.Equals(ipu.readRegister(Ps2Ipu::kRegCmd), 0x0005FFFDu, "motion_code should be signed and count its sign bit");
+            ipu.writeRegister(Ps2Ipu::kRegCmd, 0x3C000000u); // VDEC TBL=3
+            t.Equals(ipu.readRegister(Ps2Ipu::kRegCmd), 0x0002FFFFu, "dmvector '11' should decode to -1");
+            t.Equals(ipu.readRegister(Ps2Ipu::kRegCtrl) & (1u << 14), 0u, "valid symbols should not set ECD");
+        });
+
+        tc.Run("IPU BDEC outputs RAW16 residuals for a coded non-intra block and stops on a start code", [](TestCase &t)
+        {
+            // coded_block_pattern 4 '1101' selects luma block 3; '1'+'0' is DCT first coefficient +1, '10' ends it.
+            const std::vector<uint8_t> stream =
+                packIpuBits({{0xDu, 4u}, {0x1u, 1u}, {0x0u, 1u}, {0x2u, 2u}, {0x0u, 8u}, {0x000001B3u, 32u}});
+            Ps2Ipu ipu;
+            ipu.feedDmaInput(stream.data(), stream.size());
+            ipu.writeRegister(Ps2Ipu::kRegCmd, 0x20080000u); // BDEC, non-intra, quantiser_scale_code 8
+            ipu.advance(1u << 20);
+
+            t.Equals(ipu.outputBytes(), static_cast<size_t>(768), "a macroblock is 384 signed halfwords");
+            std::vector<uint8_t> out(768);
+            ipu.takeOutput(out.data(), out.size());
+            const auto sample = [&](size_t index)
+            { return static_cast<int16_t>(out[index * 2] | (out[index * 2 + 1] << 8)); };
+            // (2*1+1) * 16 * 16 >> 5 = 24 at DC, so every pixel of the block carries 24/8 = 3.
+            t.Equals(sample(8 * 16 + 8), static_cast<int16_t>(3), "block 3 starts at luma row 8, column 8");
+            t.Equals(sample(15 * 16 + 15), static_cast<int16_t>(3), "the whole block should carry the residual");
+            t.Equals(sample(0), static_cast<int16_t>(0), "uncoded blocks should be zero");
+            t.Equals(sample(256), static_cast<int16_t>(0), "uncoded chroma should be zero");
+            const uint32_t ctrl = ipu.readRegister(Ps2Ipu::kRegCtrl);
+            t.IsTrue((ctrl & (1u << 15)) != 0u, "the following start code should set SCD");
+            t.Equals(ctrl & (1u << 14), 0u, "a clean slice end should not set ECD");
+            t.Equals(ipu.readRegister(Ps2Ipu::kRegTop), 0x000001B3u, "BSTOP should sit on the start code");
+        });
+
+        tc.Run("IPU BDEC inverse DCT matches the reference transform for sparse AC blocks", [](TestCase &t)
+        {
+            static constexpr uint8_t kZigzag[64] = {
+                0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5,
+                12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6, 7, 14, 21, 28,
+                35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51,
+                58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63};
+            // Coefficients spread over several rows and columns, including all-zero rows in between.
+            const std::vector<std::pair<int, int>> coefficients = {{0, 3}, {2, -2}, {9, 5}, {20, -4}, {35, 1}, {44, 7}};
+
+            // coded_block_pattern '1101' codes luma block 3 only; each coefficient uses the MPEG-2 escape code.
+            std::vector<std::pair<uint32_t, uint32_t>> fields = {{0xDu, 4u}};
+            int previous = -1;
+            for (const auto &[index, level] : coefficients)
+            {
+                fields.push_back({0x01u, 6u});
+                fields.push_back({static_cast<uint32_t>(index - previous - 1), 6u});
+                fields.push_back({static_cast<uint32_t>(level) & 0xFFFu, 12u});
+                previous = index;
+            }
+            fields.push_back({0x2u, 2u});
+            fields.push_back({0x0u, 8u});
+            fields.push_back({0x000001B3u, 32u});
+            const std::vector<uint8_t> stream = packIpuBits(fields);
+
+            Ps2Ipu ipu;
+            ipu.feedDmaInput(stream.data(), stream.size());
+            ipu.writeRegister(Ps2Ipu::kRegCmd, 0x20080000u); // BDEC, non-intra, quantiser_scale_code 8
+            ipu.advance(1u << 20);
+            std::vector<uint8_t> out(768);
+            t.Equals(ipu.takeOutput(out.data(), out.size()), static_cast<size_t>(768), "BDEC should output one macroblock");
+
+            // Reference: non-intra dequantisation with the flat default matrix, mismatch control, separable IDCT.
+            int32_t block[64] = {};
+            int32_t sum = 0;
+            for (const auto &[index, level] : coefficients)
+            {
+                const int32_t magnitude = ((2 * std::abs(level) + 1) * 16 * 16) >> 5;
+                block[kZigzag[index]] = level < 0 ? -magnitude : magnitude;
+                sum += block[kZigzag[index]];
+            }
+            if ((sum & 1) == 0)
+                block[63] ^= 1;
+            double cosine[8][8];
+            for (int x = 0; x < 8; ++x)
+                for (int u = 0; u < 8; ++u)
+                    cosine[x][u] = (u == 0 ? std::sqrt(0.5) : 1.0) * std::cos((2.0 * x + 1.0) * u * 3.14159265358979323846 / 16.0);
+            bool matches = true;
+            for (int y = 0; y < 8; ++y)
+                for (int x = 0; x < 8; ++x)
+                {
+                    double value = 0.0;
+                    for (int v = 0; v < 8; ++v)
+                    {
+                        double row = 0.0;
+                        for (int u = 0; u < 8; ++u)
+                            row += cosine[x][u] * block[v * 8 + u];
+                        value += cosine[y][v] * row;
+                    }
+                    const int expected = std::clamp(static_cast<int>(std::floor(value / 4.0 + 0.5)), -256, 255);
+                    const size_t sample = static_cast<size_t>((8 + y) * 16 + 8 + x);
+                    const int actual = static_cast<int16_t>(out[sample * 2] | (out[sample * 2 + 1] << 8));
+                    if (actual != expected)
+                        matches = false;
+                }
+            t.IsTrue(matches, "luma block 3 should equal the reference inverse DCT");
+        });
+
+        tc.Run("IPU CSC output drains through fromIPU across QWC re-arms", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kToIpu = 0x1000B400u;
+            constexpr uint32_t kFromIpu = 0x1000B000u;
+            constexpr uint32_t kSrc = 0x00030000u;
+            constexpr uint32_t kDst = 0x00040000u;
+            constexpr uint32_t kMacroblocks = 3u;
+            uint8_t *rdram = mem.getRDRAM();
+            for (uint32_t mb = 0; mb < kMacroblocks; ++mb)
+                for (uint32_t i = 0; i < 384u; ++i)
+                    rdram[kSrc + mb * 384u + i] = static_cast<uint8_t>(i < 256u ? 16u + ((i * 7u + mb * 31u) % 220u)
+                                                                                  : 128u + static_cast<int>((i + mb) % 9u) - 4);
+            std::memset(rdram + kDst, 0xEE, kMacroblocks * 1024u + 16u);
+
+            mem.writeIORegister(kToIpu + 0x10u, kSrc);
+            mem.writeIORegister(kToIpu + 0x20u, kMacroblocks * 384u / 16u);
+            mem.writeIORegister(kToIpu + 0x00u, 0x101u);
+            mem.writeIORegister(Ps2Ipu::kRegCmd, 0x70000000u | kMacroblocks); // CSC to RGB32
+
+            // Drain in uneven pieces so the copy crosses chunk and QWC boundaries.
+            uint32_t written = 0u;
+            for (uint32_t piece : {100u, 1u, 91u})
+            {
+                mem.writeIORegister(kFromIpu + 0x10u, kDst + written * 16u);
+                mem.writeIORegister(kFromIpu + 0x20u, piece);
+                mem.writeIORegister(kFromIpu + 0x00u, 0x100u);
+                mem.advanceEeTimers(Ps2Ipu::kEeCyclesPerMacroblock);
+                t.IsTrue((mem.readIORegister(kFromIpu) & 0x100u) == 0u, "each fromIPU request should complete");
+                written += piece;
+            }
+            t.Equals(written, kMacroblocks * 64u, "the pieces cover the whole CSC output");
+
+            bool matches = true;
+            for (uint32_t mb = 0; mb < kMacroblocks; ++mb)
+            {
+                const uint8_t *in = rdram + kSrc + mb * 384u;
+                for (int y = 0; y < 16; ++y)
+                    for (int x = 0; x < 16; ++x)
+                    {
+                        const int lum = 0x95 * (in[y * 16 + x] - 16);
+                        const int u = in[256 + (y / 2) * 8 + x / 2] - 128;
+                        const int v = in[320 + (y / 2) * 8 + x / 2] - 128;
+                        const int r = std::clamp((lum + 0xCC * v) >> 7, 0, 255);
+                        const int g = std::clamp((lum - 0x68 * v - 0x32 * u) >> 7, 0, 255);
+                        const int b = std::clamp((lum + 0x102 * u) >> 7, 0, 255);
+                        const uint8_t *pixel = rdram + kDst + mb * 1024u + static_cast<uint32_t>(y * 16 + x) * 4u;
+                        if (pixel[0] != r || pixel[1] != g || pixel[2] != b || pixel[3] != 0x80u)
+                            matches = false;
+                    }
+            }
+            t.IsTrue(matches, "every macroblock should convert in order with no lost or repeated quadwords");
+            t.Equals(rdram[kDst + kMacroblocks * 1024u], static_cast<uint8_t>(0xEEu), "fromIPU must not write past the output");
+        });
+
+        tc.Run("IPU BDEC decodes intra blocks as pixels and honours DC reset", [](TestCase &t)
+        {
+            // Six blocks with zero DC differentials and immediate end-of-block.
+            std::vector<std::pair<uint32_t, uint32_t>> fields;
+            for (int i = 0; i < 4; ++i)
+            {
+                fields.push_back({0x4u, 3u}); // luma dct_dc_size 0
+                fields.push_back({0x2u, 2u}); // end of block
+            }
+            for (int i = 0; i < 2; ++i)
+            {
+                fields.push_back({0x0u, 2u}); // chroma dct_dc_size 0
+                fields.push_back({0x2u, 2u});
+            }
+            fields.push_back({0x1u, 1u});
+            const std::vector<uint8_t> stream = packIpuBits(fields);
+            Ps2Ipu ipu;
+            ipu.feedDmaInput(stream.data(), stream.size());
+            ipu.writeRegister(Ps2Ipu::kRegCmd, 0x2C010000u); // BDEC, intra, DC reset, quantiser_scale_code 1
+            ipu.advance(1u << 20);
+
+            std::vector<uint8_t> out(768);
+            t.Equals(ipu.takeOutput(out.data(), out.size()), static_cast<size_t>(768), "an intra macroblock should be output");
+            t.Equals(out[0] | (out[1] << 8), 128, "a reset DC predictor reconstructs mid-grey luma");
+            t.Equals(out[767 - 1] | (out[767] << 8), 128, "chroma should also be mid-grey");
+        });
+
+        tc.Run("IPU IDEC decodes an intra macroblock into RGB32 for fromIPU DMA", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            // One intra macroblock with zero DC differentials and immediate end-of-block, then a start code.
+            std::vector<uint8_t> stream;
+            uint32_t accumulator = 0u;
+            uint32_t bits = 0u;
+            auto put = [&](uint32_t value, uint32_t count)
+            {
+                for (uint32_t i = count; i-- > 0u;)
+                {
+                    accumulator = (accumulator << 1u) | ((value >> i) & 1u);
+                    if (++bits == 8u)
+                    {
+                        stream.push_back(static_cast<uint8_t>(accumulator));
+                        accumulator = 0u;
+                        bits = 0u;
+                    }
+                }
+            };
+            put(1u, 1u); // macroblock_type: intra
+            for (int block = 0; block < 4; ++block)
+            {
+                put(0x4u, 3u); // luma dct_dc_size 0
+                put(0x2u, 2u); // end of block (table B.14)
+            }
+            for (int block = 0; block < 2; ++block)
+            {
+                put(0x0u, 2u); // chroma dct_dc_size 0
+                put(0x2u, 2u);
+            }
+            while (bits != 0u)
+                put(0u, 1u);
+            for (uint8_t byte : {0x00, 0x00, 0x01, 0xB0})
+                put(byte, 8u);
+            while (stream.size() % 16u != 0u)
+                stream.push_back(0u);
+
+            constexpr uint32_t kToIpu = 0x1000B400u;
+            constexpr uint32_t kFromIpu = 0x1000B000u;
+            constexpr uint32_t kSrc = 0x00030000u;
+            constexpr uint32_t kDst = 0x00040000u;
+            uint8_t *rdram = mem.getRDRAM();
+            std::memcpy(rdram + kSrc, stream.data(), stream.size());
+            std::memset(rdram + kDst, 0xEE, 1024u + 16u);
+
+            mem.writeIORegister(kToIpu + 0x10u, kSrc);
+            mem.writeIORegister(kToIpu + 0x20u, static_cast<uint32_t>(stream.size() / 16u));
+            mem.writeIORegister(kToIpu + 0x00u, 0x101u);
+            // Mana Khemia arms fromIPU for the whole picture, starts IDEC, then re-arms it per chunk
+            // before the (slow, on hardware) IPU has produced anything; the re-arm must win.
+            mem.writeIORegister(kFromIpu + 0x10u, kDst + 0x2000u);
+            mem.writeIORegister(kFromIpu + 0x20u, 128u);
+            mem.writeIORegister(kFromIpu + 0x00u, 0x100u);
+            mem.writeIORegister(Ps2Ipu::kRegCmd, 0x10010000u); // IDEC, QSC=1, RGB32
+            mem.writeIORegister(kFromIpu + 0x10u, kDst);
+            mem.writeIORegister(kFromIpu + 0x20u, 64u);
+            mem.writeIORegister(kFromIpu + 0x00u, 0x100u);
+            t.IsTrue((mem.readIORegister(kFromIpu) & 0x100u) != 0u, "fromIPU should wait while the IPU is still decoding");
+            mem.advanceEeTimers(Ps2Ipu::kEeCyclesPerMacroblock);
+            const uint32_t ctrl = mem.readIORegister(Ps2Ipu::kRegCtrl);
+            t.Equals(ctrl & (1u << 14), 0u, "IDEC should not report a decode error");
+            t.IsTrue((ctrl & (1u << 15)) != 0u, "IDEC should stop at the start code");
+            t.IsTrue((mem.readIORegister(kFromIpu) & 0x100u) == 0u, "fromIPU should complete with one macroblock");
+
+            bool uniform = true;
+            for (uint32_t i = 0; i < 256u; ++i)
+            {
+                const uint8_t *pixel = rdram + kDst + i * 4u;
+                if (pixel[0] != 130u || pixel[1] != 130u || pixel[2] != 130u || pixel[3] != 0x80u)
+                    uniform = false;
+            }
+            t.IsTrue(uniform, "a flat DC-only macroblock should convert to uniform mid gray with alpha 0x80");
+            t.Equals(rdram[kDst + 1024u], static_cast<uint8_t>(0xEEu), "fromIPU must not write past its QWC");
+            t.Equals(rdram[kDst + 0x2000u], static_cast<uint8_t>(0u), "the superseded fromIPU request must not receive output");
+
+            mem.writeIORegister(Ps2Ipu::kRegCmd, 0x40000000u); // FDEC
+            t.Equals(mem.readIORegister(Ps2Ipu::kRegCmd), 0x000001B0u, "IDEC should leave the start code unconsumed");
+        });
+
+        tc.Run("native GIF image upload reads SPR-flagged ref payloads from scratchpad", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            GS gs;
+            gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
+
+            constexpr uint32_t kChain = 0x00028000u;
+            constexpr uint32_t kSprOffset = 0x1800u;
+            uint8_t *rdram = mem.getRDRAM();
+            uint8_t *scratch = mem.getScratchpad();
+            for (uint32_t i = 0; i < 16u; ++i)
+                scratch[kSprOffset + i] = static_cast<uint8_t>(0x60u + i);
+            std::memset(rdram + kSprOffset, 0, 16u); // what a plain RAM read would see
+
+            uint32_t chain = kChain;
+            chain = writeTextureUploadSetup(rdram, chain, 0u, GS_PSM_CT32);
+            chain = writeTextureImageRef(rdram, chain, 1u, 0u);
+            // Sofdec stages converted movie macroblocks in scratchpad and refs them with the SPR flag.
+            const uint64_t refTag = 1ull | (3ull << 28) | (static_cast<uint64_t>(0x80000000u | kSprOffset) << 32);
+            std::memcpy(rdram + chain - 16u, &refTag, sizeof(refTag));
+            writeDmaTag(rdram, chain, makeDmaTag(0u, 7u, 0u, false)); // END.
+
+            t.IsTrue(mem.tryProcessNativeGifImageUploadChain(gs, kChain, 0x105u), "the chain should use the native upload path");
+            const uint32_t dstOff = GSPSMCT32::addrPSMCT32(0u, 1u, 0u, 0u);
+            t.Equals(mem.getGSVRAM()[dstOff], static_cast<uint8_t>(0x60u), "pixels should come from scratchpad, not RDRAM");
+        });
+
         tc.Run("native GIF image upload recognizes canonical load-image chain", [](TestCase &t)
         {
             PS2Memory mem;
@@ -1368,6 +1930,81 @@ void register_ps2_memory_tests()
                 }
             }
             t.IsTrue(ct32Ok, "all CT32 pixels should survive a preceding paletted upload in the same GIF DMA chain");
+        });
+
+        tc.Run("GIF DMA chain uploads CT24 column strips from per-macroblock REF tags", [](TestCase &t)
+        {
+            // Movie players upload a frame as 16-pixel-wide CT24 strips: one setup CNT that ends in the IMAGE
+            // GIFtag, then one REF per 16x16 macroblock (768 bytes = 48 qwords), strips side by side via DSAX.
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            GS gs;
+            gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
+            mem.setGifPacketCallback([&](const uint8_t *data, uint32_t sizeBytes)
+                                     { gs.processGIFPacket(data, sizeBytes); });
+
+            constexpr uint32_t kGifCh = 0x1000A000u;
+            constexpr uint32_t kChain = 0x00030000u;
+            constexpr uint32_t kData = 0x00040000u;
+            constexpr uint32_t kStrips = 3u;
+            constexpr uint32_t kBlocksPerStrip = 2u;
+            constexpr uint32_t kBlockBytes = 16u * 16u * 3u;
+            constexpr uint32_t kDbp = 0u;
+            constexpr uint32_t kDbw = 10u;
+
+            uint8_t *rdram = mem.getRDRAM();
+            for (uint32_t i = 0; i < kStrips * kBlocksPerStrip * kBlockBytes; ++i)
+                rdram[kData + i] = static_cast<uint8_t>((i * 7u) ^ (i >> 8u));
+
+            uint32_t chain = kChain;
+            for (uint32_t strip = 0; strip < kStrips; ++strip)
+            {
+                writeDmaTag(rdram, chain, makeDmaTag(6u, 1u, 0u, false)); // CNT: setup + IMAGE GIFtag.
+                chain += 16u;
+                writeU64(rdram, chain + 0u, makeGifTag(4u, GIF_FMT_PACKED, 1u, false));
+                writeU64(rdram, chain + 8u, 0x0Eull);
+                chain += 16u;
+                chain = writeGifAd(rdram, chain, makeBitbltbuf(kDbp, kDbw, GS_PSM_CT24), GS_REG_BITBLTBUF);
+                chain = writeGifAd(rdram, chain, static_cast<uint64_t>(strip * 16u) << 32, GS_REG_TRXPOS);
+                chain = writeGifAd(rdram, chain, 16ull | (static_cast<uint64_t>(16u * kBlocksPerStrip) << 32), GS_REG_TRXREG);
+                chain = writeGifAd(rdram, chain, 0ull, GS_REG_TRXDIR);
+                writeU64(rdram, chain + 0u, makeGifTag(static_cast<uint16_t>(kBlocksPerStrip * kBlockBytes / 16u), GIF_FMT_IMAGE, 0u, true));
+                writeU64(rdram, chain + 8u, 0ull);
+                chain += 16u;
+                for (uint32_t block = 0; block < kBlocksPerStrip; ++block)
+                {
+                    const uint32_t src = kData + (block * kStrips + strip) * kBlockBytes; // raster macroblock order
+                    writeDmaTag(rdram, chain, makeDmaTag(static_cast<uint16_t>(kBlockBytes / 16u), 3u, src, false));
+                    chain += 16u;
+                }
+            }
+            writeDmaTag(rdram, chain, makeDmaTag(0u, 7u, 0u, false)); // END.
+
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x30u, kChain), "write GIF TADR should succeed");
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x00u, 0x104u), "write GIF CHCR STR|CHAIN should succeed");
+            mem.processPendingTransfers();
+
+            bool ok = true;
+            for (uint32_t y = 0; y < 16u * kBlocksPerStrip && ok; ++y)
+            {
+                for (uint32_t x = 0; x < 16u * kStrips && ok; ++x)
+                {
+                    const uint32_t block = (y / 16u) * kStrips + (x / 16u);
+                    const uint32_t src = kData + block * kBlockBytes + ((y % 16u) * 16u + (x % 16u)) * 3u;
+                    const uint32_t dst = GSPSMCT32::addrPSMCT32(kDbp, kDbw, x, y);
+                    for (uint32_t c = 0; c < 3u; ++c)
+                    {
+                        if (mem.getGSVRAM()[dst + c] != rdram[src + c])
+                        {
+                            ok = false;
+                            t.IsTrue(false, "CT24 strip pixel mismatch at x=" + std::to_string(x) + " y=" + std::to_string(y));
+                            break;
+                        }
+                    }
+                }
+            }
+            t.IsTrue(ok, "every strip should land at its own DSAX with its own macroblocks");
         });
 
         tc.Run("VIF1 DMA DIRECT forwards payload to GIF callback and clears channel", [](TestCase &t)
@@ -2042,6 +2679,69 @@ void register_ps2_memory_tests()
                      "sceDmaSend must preserve guest-configured CHCR.TTE");
             t.Equals(mem.vif1_regs.itops, 0x66u,
                      "preserved TTE should deliver the tag high-half VIFcode");
+        });
+
+        tc.Run("sceDmaSend leaves CHCR.TIE alone so an IRQ tag does not end the chain", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kVif1Ch = 0x10009000u;
+            constexpr uint32_t kTag = 0x00028500u;
+
+            PS2Memory &mem = runtime.memory();
+            uint8_t *rdram = mem.getRDRAM();
+            // CNT with its IRQ bit set, then END; each carries an ITOP in the tag's high half (TTE).
+            writeDmaTag(rdram, kTag, makeDmaTag(0u, 1u, 0u, true));
+            const uint32_t firstItop = makeVifCmd(0x04u, 0u, 0x11u);
+            std::memcpy(rdram + kTag + 12u, &firstItop, sizeof(firstItop));
+            writeDmaTag(rdram, kTag + 16u, makeDmaTag(0u, 7u, 0u, false));
+            const uint32_t lastItop = makeVifCmd(0x04u, 0u, 0x66u);
+            std::memcpy(rdram + kTag + 16u + 12u, &lastItop, sizeof(lastItop));
+
+            // libdma keeps the guest's CHCR bits: TTE set, TIE clear.
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x40u), "guest should be able to set CHCR.TTE");
+            R5900Context ctx{};
+            setRegU32(ctx, 4, 1u);
+            setRegU32(ctx, 5, kTag);
+            ps2_stubs::sceDmaSend(rdram, &ctx, &runtime);
+
+            t.Equals(mem.vif1_regs.itops, 0x66u, "with TIE clear the IRQ tag must not stop the chain");
+        });
+
+        tc.Run("sceDmaRecvN copies scratchpad data back to RDRAM", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kFromSprCh = 0x1000D000u;
+            constexpr uint32_t kDest = 0x00028000u;
+            constexpr uint32_t kScratchOffset = 0x400u;
+            constexpr uint32_t kQwc = 3u;
+
+            PS2Memory &mem = runtime.memory();
+            uint8_t *rdram = mem.getRDRAM();
+            uint8_t *scratch = mem.getScratchpad();
+            for (uint32_t i = 0; i < kQwc * 16u; ++i)
+            {
+                scratch[kScratchOffset + i] = static_cast<uint8_t>(0x30u + i);
+            }
+            std::memset(rdram + kDest, 0, kQwc * 16u + 16u);
+
+            // Mana Khemia sets the channel's SADR, then calls sceDmaRecvN(fromSPR, dest, qwc).
+            t.IsTrue(mem.writeIORegister(kFromSprCh + 0x80u, kScratchOffset), "guest should be able to set SADR");
+            R5900Context ctx{};
+            setRegU32(ctx, 4, kFromSprCh);
+            setRegU32(ctx, 5, kDest);
+            setRegU32(ctx, 6, kQwc);
+            ps2_stubs::sceDmaRecvN(rdram, &ctx, &runtime);
+
+            t.Equals(static_cast<int32_t>(::getRegU32(&ctx, 2)), 0, "sceDmaRecvN should accept the transfer");
+            t.Equals(std::memcmp(rdram + kDest, scratch + kScratchOffset, kQwc * 16u), 0,
+                     "sceDmaRecvN should copy QWC quadwords from SADR into RDRAM");
+            t.Equals(rdram[kDest + kQwc * 16u], static_cast<uint8_t>(0u), "sceDmaRecvN must not copy past QWC");
+            t.IsTrue((mem.readIORegister(kFromSprCh + 0x00u) & 0x100u) == 0u,
+                     "the fromSPR channel should finish (STR cleared)");
         });
 
         tc.Run("VIF1 DMA DIRECT image packet reaches GS through arbiter", [](TestCase &t)

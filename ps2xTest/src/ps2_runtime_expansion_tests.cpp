@@ -936,8 +936,9 @@ void register_ps2_runtime_expansion_tests()
 
             t.IsFalse(runtime.isStopRequested(),
                       "sceIpuInit should tolerate the missing optional SetD4 helper");
-            t.Equals(runtime.memory().read32(0x10002010u), 0x40000000u,
-                     "sceIpuInit should still program IPU_CTRL");
+            // The final reset strobe empties the FIFO and, being write-only, leaves IPU_CTRL reading clear.
+            t.Equals(runtime.memory().read32(0x10002010u), 0u,
+                     "sceIpuInit should end by resetting the IPU");
             t.Equals(runtime.memory().read32(0x10002000u), 0u,
                      "sceIpuInit should leave IPU_CMD reset after initialization");
         });
@@ -964,8 +965,8 @@ void register_ps2_runtime_expansion_tests()
                      "the invocation should receive the SetD4 enable argument");
             t.Equals(gIpuInitResult.load(std::memory_order_acquire), 0,
                      "the HLE completion should resume the preserved base context with success");
-            t.Equals(runtime.memory().read32(0x10002010u), 0x40000000u,
-                     "IPU initialization should finish only after the guest invocation completes");
+            t.Equals(runtime.memory().read32(0x10002010u), 0u,
+                     "IPU initialization should leave the IPU reset once the guest invocation completes");
         });
 
         tc.Run("sprintf consumes EE varargs from a2 a3 t0 and preserves width formatting", [](TestCase &t)
@@ -992,6 +993,110 @@ void register_ps2_runtime_expansion_tests()
                      "sprintf should read the third variadic integer from t0 and honor %02d");
             t.Equals(getRegS32(ctx, 2), static_cast<int32_t>(rendered.size()),
                      "sprintf should return the rendered length");
+        });
+
+        tc.Run("rand follows newlib's 31-bit LCG", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            R5900Context ctx{};
+
+            setRegU32(ctx, 4, 1u);
+            ps2_stubs::srand(rdram.data(), &ctx, &runtime);
+            const int32_t expected[3] = {1481765933, 1085377743, 1270216262};
+            for (int32_t value : expected)
+            {
+                ps2_stubs::rand(rdram.data(), &ctx, &runtime);
+                t.Equals(getRegS32(ctx, 2), value, "rand should return newlib's sequence for seed 1");
+            }
+        });
+
+        tc.Run("vfprintf fills guest newlib string FILEs from doubleword va_list slots", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            R5900Context ctx{};
+
+            // Layout of guest newlib snprintf's stack FILE: _p, _w and __SWR|__SSTR flags.
+            constexpr uint32_t kFileAddr = 0x00003000u;
+            constexpr uint32_t kDestAddr = 0x00003100u;
+            constexpr uint32_t kFormatAddr = 0x00003200u;
+            constexpr uint32_t kVaListAddr = 0x00003300u;
+            constexpr char kFormat[] = "%s/%02d_%d.bin";
+            constexpr char kDir[] = "DATA";
+            constexpr uint32_t kDirAddr = 0x00003280u;
+            constexpr uint32_t kRoom = 8u;
+
+            std::memcpy(rdram.data() + kFormatAddr, kFormat, sizeof(kFormat));
+            std::memcpy(rdram.data() + kDirAddr, kDir, sizeof(kDir));
+            const uint32_t fileWords[] = {kDestAddr, 0u, kRoom, 0x0208u};
+            std::memcpy(rdram.data() + kFileAddr, fileWords, sizeof(fileWords));
+            const uint64_t slots[] = {kDirAddr, 7u, 3u};
+            std::memcpy(rdram.data() + kVaListAddr, slots, sizeof(slots));
+            std::memset(rdram.data() + kDestAddr, 0xAA, 16u);
+
+            setRegU32(ctx, 4, kFileAddr);
+            setRegU32(ctx, 5, kFormatAddr);
+            setRegU32(ctx, 6, kVaListAddr);
+            ps2_stubs::vfprintf(rdram.data(), &ctx, &runtime);
+
+            const std::string full = "DATA/07_3.bin";
+            t.Equals(getRegS32(ctx, 2), static_cast<int32_t>(full.size()),
+                     "vfprintf should return the full rendered length");
+            t.Equals(std::string(reinterpret_cast<const char *>(rdram.data() + kDestAddr), kRoom),
+                     full.substr(0, kRoom), "vfprintf should copy at most _w bytes to _p");
+            t.Equals(rdram[kDestAddr + kRoom], static_cast<uint8_t>(0xAAu),
+                     "vfprintf must not write past _w; the caller NUL-terminates");
+            uint32_t cursor = 0u;
+            uint32_t room = 0u;
+            std::memcpy(&cursor, rdram.data() + kFileAddr, 4u);
+            std::memcpy(&room, rdram.data() + kFileAddr + 8u, 4u);
+            t.Equals(cursor, kDestAddr + kRoom, "vfprintf should advance _p");
+            t.Equals(room, 0u, "vfprintf should consume _w");
+        });
+
+        tc.Run("PMFHL and PMTHL move 32-bit words between HI/LO pipelines and a GPR", [](TestCase &t)
+        {
+            // MULTU leaves a 64-bit product split across LO/HI; libgcc's soft-double multiply reads it
+            // back with PMFHL.LW, so every word must come from the right pipeline register.
+            R5900Context ctx{};
+            ctx.lo = 0xFFFFFFFF89ABCDEFull; // MULTU sign-extends each 32-bit half into LO/HI
+            ctx.hi = 0x0000000001234567ull;
+            ctx.lo1 = 0x00000000AAAA5555ull;
+            ctx.hi1 = 0xFFFFFFFF80000000ull;
+
+            alignas(16) uint32_t w[4];
+            _mm_store_si128(reinterpret_cast<__m128i *>(w), PS2_PMFHL_LW(&ctx));
+            t.Equals(w[0], 0x89ABCDEFu, "PMFHL.LW word 0 is LO0's low word");
+            t.Equals(w[1], 0x01234567u, "PMFHL.LW word 1 is HI0's low word, completing the 64-bit product");
+            t.Equals(w[2], 0xAAAA5555u, "PMFHL.LW word 2 comes from LO1");
+            t.Equals(w[3], 0x80000000u, "PMFHL.LW word 3 comes from HI1");
+
+            _mm_store_si128(reinterpret_cast<__m128i *>(w), PS2_PMFHL_UW(&ctx));
+            t.Equals(w[0], 0xFFFFFFFFu, "PMFHL.UW word 0 is LO0's high word");
+            t.Equals(w[1], 0x00000000u, "PMFHL.UW word 1 is HI0's high word");
+
+            alignas(16) int64_t d[2];
+            _mm_store_si128(reinterpret_cast<__m128i *>(d), PS2_PMFHL_SLW(&ctx));
+            t.Equals(d[0], static_cast<int64_t>(0x7FFFFFFF), "PMFHL.SLW saturates a large {HI,LO} pair");
+            t.Equals(d[1], static_cast<int64_t>(-0x80000000ll), "PMFHL.SLW saturates negative pipeline-1 values");
+
+            alignas(16) uint16_t h[8];
+            _mm_store_si128(reinterpret_cast<__m128i *>(h), PS2_PMFHL_LH(&ctx));
+            t.Equals(h[0], static_cast<uint16_t>(0xCDEF), "PMFHL.LH takes LO halfword 0");
+            t.Equals(h[1], static_cast<uint16_t>(0xFFFF), "PMFHL.LH takes LO halfword 2");
+            t.Equals(h[2], static_cast<uint16_t>(0x4567), "PMFHL.LH takes HI halfword 0");
+
+            alignas(16) int16_t sh[8];
+            _mm_store_si128(reinterpret_cast<__m128i *>(sh), PS2_PMFHL_SH(&ctx));
+            t.Equals(sh[0], static_cast<int16_t>(-0x8000), "PMFHL.SH saturates negative words");
+            t.Equals(sh[2], static_cast<int16_t>(0x7FFF), "PMFHL.SH saturates positive words");
+
+            PS2_PMTHL_LW(&ctx, _mm_set_epi32(4, 3, 2, 1));
+            t.Equals(ctx.lo, 0xFFFFFFFF00000001ull, "PMTHL.LW replaces only LO0's low word");
+            t.Equals(ctx.hi, 0x0000000000000002ull, "PMTHL.LW replaces only HI0's low word");
+            t.Equals(ctx.lo1, 0x0000000000000003ull, "PMTHL.LW writes LO1");
+            t.Equals(ctx.hi1, 0xFFFFFFFF00000004ull, "PMTHL.LW writes HI1");
         });
 
         tc.Run("multiply-add matrix writes rd only when R5900 requires it", [](TestCase &t)

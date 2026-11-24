@@ -2,6 +2,7 @@
 #define PS2_LOG_H
 
 #include <algorithm>
+#include <cstdlib>
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -160,8 +161,21 @@ inline int &depth()
     static thread_local int d = 0;
     return d;
 }
+// Tracing every generated function with a flush per line took ~90% of the EE thread,
+// so the trace is opt-in: set PS2X_TRACE_CALLS=1 to write ps2_log.txt.
+inline bool trace_calls_enabled()
+{
+    static const bool enabled = []()
+    {
+        const char *value = std::getenv("PS2X_TRACE_CALLS");
+        return value != nullptr && value[0] != '\0' && value[0] != '0';
+    }();
+    return enabled;
+}
 inline void log_entry(const char *name)
 {
+    if (!trace_calls_enabled())
+        return;
     for (int i = 0; i < depth(); ++i)
         log_stream() << '\t';
     log_stream() << ">> " << name << " enter\n";
@@ -170,6 +184,8 @@ inline void log_entry(const char *name)
 }
 inline void log_exit(const char *name)
 {
+    if (!trace_calls_enabled())
+        return;
     depth()--;
     for (int i = 0; i < depth(); ++i)
         log_stream() << '\t';
@@ -178,7 +194,8 @@ inline void log_exit(const char *name)
 }
 inline void print_saved_location()
 {
-    std::cout << "[PS2 LOG] Logs saved at " << log_path() << std::endl;
+    if (trace_calls_enabled())
+        std::cout << "[PS2 LOG] Logs saved at " << log_path() << std::endl;
 }
 }
 
