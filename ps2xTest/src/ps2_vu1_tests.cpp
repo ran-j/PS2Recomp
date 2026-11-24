@@ -1053,13 +1053,13 @@ void register_ps2_vu1_tests()
                      "the flag-driven branch should arrive at its target");
         });
 
-        tc.Run("JR shares the one-instruction VI branch visibility rule", [](TestCase &t)
+        tc.Run("JR reads a VI written by the instruction before it (no branch backup, as PCSX2)", [](TestCase &t)
         {
             Vu1Fixture fx;
             t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
 
             writeVuInstructionPair(
-                fx.code, 0u, makeVuIaddiu(1u, 0u, 2),
+                fx.code, 0u, makeVuIaddiu(1u, 0u, 3),
                 kVuUpperNop);
             writeVuInstructionPair(
                 fx.code, 8u, makeVuJr(1u),
@@ -1080,14 +1080,17 @@ void register_ps2_vu1_tests()
                         fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem,
                         0u, 0u, 0u, 4u);
 
-            t.Equals(vu1.state().vi[1], 2,
-                     "the pending IALU write should still commit normally");
+            // Only the conditional branches take the backup of a VI written by the previous instruction;
+            // JR/JALR use the new value (PCSX2's interpreter and microVU; computed jumps into unrolled
+            // loops rely on it). vi1 = 3 -> pc 24, not the old vi1 = 4 -> pc 32.
+            t.Equals(vu1.state().vi[1], 3,
+                     "the IALU write should commit normally");
             t.Equals(vu1.state().vi[2], 2,
                      "JR should execute exactly one delay-slot pair");
-            t.Equals(vu1.state().vi[3], 0,
-                     "JR should skip the sequential instruction after its delay slot");
-            t.Equals(vu1.state().vi[4], 4,
-                     "JR immediately after a VI write should branch using the previous VI value");
+            t.Equals(vu1.state().vi[3], 3,
+                     "JR right after a VI write should branch to the new VI value (pc 24)");
+            t.Equals(vu1.state().vi[4], 0,
+                     "the fourth pair is pc 24, so pc 32 is not reached");
         });
 
         tc.Run("MPG upload invalidates cached VU1 decode before MSCAL", [](TestCase &t)
