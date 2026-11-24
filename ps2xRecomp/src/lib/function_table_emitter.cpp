@@ -157,14 +157,35 @@ namespace ps2recomp
         ss << "extern const uint32_t g_ps2RecompiledFunctionTableSlotCount = " << std::dec << slotCount << "u;\n";
         ss << "PS2Runtime::RecompiledFunction g_ps2RecompiledFunctionTable[" << std::dec << (slotCount == 0u ? 1u : slotCount) << "u] = {};\n\n";
 
+        // A single function body with one statement per table entry scales very
+        // poorly in compiler frontends (debug-info line tables, stack layout,
+        // etc. all rescan the whole function): for a full retail game this can
+        // turn a sub-minute compile into one that runs for hours. Splitting the
+        // initializer into fixed-size chunks keeps each function body small and
+        // restores near-linear total compile time.
+        constexpr size_t kInitializerChunkSize = 2000;
+        const size_t chunkCount = entries.empty() ? 0u : (entries.size() + kInitializerChunkSize - 1u) / kInitializerChunkSize;
+
         ss << "namespace {\n";
+        for (size_t chunk = 0; chunk < chunkCount; ++chunk)
+        {
+            ss << "static void ps2RecompiledFunctionTableInitChunk" << chunk << "() {\n";
+            const size_t begin = chunk * kInitializerChunkSize;
+            const size_t end = std::min(begin + kInitializerChunkSize, entries.size());
+            for (size_t i = begin; i < end; ++i)
+            {
+                const auto &[address, name] = entries[i];
+                const uint32_t slot = (address - tableBase) >> 2;
+                ss << "    g_ps2RecompiledFunctionTable[" << std::dec << slot << "] = " << name
+                   << "; // 0x" << std::hex << address << std::dec << "\n";
+            }
+            ss << "}\n";
+        }
         ss << "struct GeneratedFunctionTableInitializer {\n";
         ss << "    GeneratedFunctionTableInitializer() {\n";
-        for (const auto &[address, name] : entries)
+        for (size_t chunk = 0; chunk < chunkCount; ++chunk)
         {
-            const uint32_t slot = (address - tableBase) >> 2;
-            ss << "        g_ps2RecompiledFunctionTable[" << std::dec << slot << "] = " << name
-               << "; // 0x" << std::hex << address << std::dec << "\n";
+            ss << "        ps2RecompiledFunctionTableInitChunk" << chunk << "();\n";
         }
         ss << "    }\n";
         ss << "};\n";
