@@ -4,6 +4,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -115,6 +116,9 @@ public:
                            const uint8_t *data,
                            uint32_t sizeBytes);
     void writeRegister(uint8_t regAddr, uint64_t value);
+
+    using InterruptCallback = std::function<void()>;
+    void setInterruptCallback(InterruptCallback cb) { m_interruptCallback = std::move(cb); }
 
     const uint8_t *lockDisplaySnapshot(uint32_t &outSize);
     void unlockDisplaySnapshot();
@@ -242,6 +246,7 @@ private:
     bool m_debugHistoryPaused = true;
 
     std::unique_ptr<GSRasterBackend> m_backend;
+    InterruptCallback m_interruptCallback;
 };
 
 #endif

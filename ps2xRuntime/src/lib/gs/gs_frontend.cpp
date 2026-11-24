@@ -1472,6 +1472,8 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
             lo = (lo & ~mask) | (id & mask);
             m_privRegs->siglblid = (m_privRegs->siglblid & 0xFFFFFFFF00000000ULL) | lo;
             m_privRegs->csr.fetch_or(0x1);
+            if ((m_privRegs->imr & (1ull << 8)) == 0 && m_interruptCallback)
+                m_interruptCallback();
         }
         break;
     }
@@ -1483,7 +1485,11 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
             m_backend->Sync(GSSyncReason::Finish);
         }
         if (m_privRegs)
+        {
             m_privRegs->csr.fetch_or(0x2);
+            if ((m_privRegs->imr & (1ull << 9)) == 0 && m_interruptCallback)
+                m_interruptCallback();
+        }
         break;
     }
     case GS_REG_LABEL:
