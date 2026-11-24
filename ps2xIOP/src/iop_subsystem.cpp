@@ -23,6 +23,7 @@ namespace ps2x::iop
             coreServices.emplace_back(detail::createMcservService(host));
             coreServices.emplace_back(detail::createDbcmanService(host));
             coreServices.emplace_back(detail::createLibSdService(host));
+            coreServices.emplace_back(detail::createCdvdmanService(host));
             refreshServiceModuleKeys();
             rebuildRoutes();
         }
