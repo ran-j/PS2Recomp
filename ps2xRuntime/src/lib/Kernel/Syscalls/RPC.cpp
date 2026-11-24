@@ -233,7 +233,6 @@ namespace ps2_syscalls
             g_rpc_servers.clear();
             g_rpc_clients.clear();
             g_rpc_next_id = 1;
-            g_rpc_packet_index = 0;
             g_rpc_server_index = 0;
             g_rpc_active_queue = 0;
             g_sif_rpc_debug_next_seq = 0;
@@ -283,6 +282,7 @@ namespace ps2_syscalls
         client->hdr.mode = mode;
 
         uint32_t serverPtr = 0;
+        bool eeDescriptor = false;
         {
             std::lock_guard<std::mutex> lock(g_rpc_mutex);
             client->hdr.rpc_id = g_rpc_next_id++;
@@ -290,6 +290,7 @@ namespace ps2_syscalls
             if (it != g_rpc_servers.end())
             {
                 serverPtr = it->second.sd_ptr;
+                eeDescriptor = it->second.eeDescriptor;
             }
             g_rpc_clients[clientPtr] = {};
             g_rpc_clients[clientPtr].sid = rpcId;
@@ -297,37 +298,25 @@ namespace ps2_syscalls
 
         if (!serverPtr && PS2IopTransport::canBindRpc(runtime, rpcId))
         {
-            // EE-side servers and HLE routes need a descriptor in guest RAM.
-            // With an emulated IOP, only publish it after the IRX has actually
-            // registered the SID; cd->server == nullptr is the SDK's retry
-            // signal while the IOP server thread is still starting.
-            serverPtr = rpcAllocServerAddr(rdram);
-            if (serverPtr)
-            {
-                t_SifRpcServerData *dummy = reinterpret_cast<t_SifRpcServerData *>(getMemPtr(rdram, serverPtr));
-                if (dummy)
-                {
-                    std::memset(dummy, 0, sizeof(*dummy));
-                    dummy->sid = static_cast<int>(rpcId);
-                }
-                std::lock_guard<std::mutex> lock(g_rpc_mutex);
-                g_rpc_servers[rpcId] = {rpcId, serverPtr};
-            }
+            // An IOP-side server (or HLE route) gets a handle, not EE memory:
+            // its descriptor lives in IOP RAM and the guest only tests
+            // cd->server against 0. With an emulated IOP, only publish it
+            // after the IRX has actually registered the SID; cd->server ==
+            // nullptr is the SDK's retry signal while the IOP server thread is
+            // still starting.
+            std::lock_guard<std::mutex> lock(g_rpc_mutex);
+            serverPtr = rpcNextIopServerHandleLocked();
+            g_rpc_servers[rpcId] = {rpcId, serverPtr, false};
         }
 
-        if (serverPtr)
-        {
-            t_SifRpcServerData *sd = reinterpret_cast<t_SifRpcServerData *>(getMemPtr(rdram, serverPtr));
-            client->server = serverPtr;
-            client->buf = sd ? sd->buf : 0;
-            client->cbuf = sd ? sd->cbuf : 0;
-        }
-        else
-        {
-            client->server = 0;
-            client->buf = 0;
-            client->cbuf = 0;
-        }
+        // cd->buf/cbuf mirror the server's buffers. Only a server the guest
+        // registered on the EE has its descriptor, and its buffers, in EE RAM.
+        const t_SifRpcServerData *sd = eeDescriptor
+                                           ? reinterpret_cast<const t_SifRpcServerData *>(getMemPtr(rdram, serverPtr))
+                                           : nullptr;
+        client->server = serverPtr;
+        client->buf = sd ? sd->buf : 0;
+        client->cbuf = sd ? sd->cbuf : 0;
 
         SifRpcDebugEvent event = makeRpcDebugEvent("BindRpc", ctx, runtime);
         event.clientPtr = clientPtr;
@@ -484,6 +473,7 @@ namespace ps2_syscalls
         client->hdr.mode = mode;
 
         uint32_t sid = 0u;
+        bool eeDescriptor = false;
         {
             std::lock_guard<std::mutex> lock(g_rpc_mutex);
             auto &state = g_rpc_clients[clientPtr];
@@ -497,12 +487,17 @@ namespace ps2_syscalls
                     serverIt->second.sd_ptr != 0u)
                 {
                     client->server = serverIt->second.sd_ptr;
+                    eeDescriptor = serverIt->second.eeDescriptor;
                 }
             }
         }
 
+        // Only a server the guest registered on the EE has a descriptor in EE
+        // RAM, the guest's own, which is filled in here as the EE sifrpc
+        // library does. An IOP server's descriptor is IOP state; cd->server is
+        // only a handle to it.
         const uint32_t serverPtr = client->server;
-        auto *server = serverPtr
+        auto *server = eeDescriptor
                            ? reinterpret_cast<t_SifRpcServerData *>(getMemPtr(rdram, serverPtr))
                            : nullptr;
         if (server)
@@ -785,7 +780,7 @@ namespace ps2_syscalls
                 }
             }
 
-            g_rpc_servers[sid] = {sid, sdPtr};
+            g_rpc_servers[sid] = {sid, sdPtr, true};
             for (auto &entry : g_rpc_clients)
             {
                 if (entry.second.sid == sid)

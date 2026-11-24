@@ -83,26 +83,13 @@ static bool readStackU32(uint8_t *rdram, uint32_t sp, uint32_t offset, uint32_t 
     return true;
 }
 
-static uint32_t rpcAllocPacketAddr(uint8_t *rdram)
+// cd->server for the next IOP-side server. Nothing dereferences it, so a
+// handle reused after kIopRpcServerHandleCount servers is harmless. The caller
+// holds g_rpc_mutex.
+static uint32_t rpcNextIopServerHandleLocked()
 {
-    if (kRpcPacketPoolCount == 0)
-        return 0;
-
-    uint32_t slot = g_rpc_packet_index++ % kRpcPacketPoolCount;
-    uint32_t addr = kRpcPacketPoolBase + (slot * kRpcPacketSize);
-    rpcZeroRdram(rdram, addr, kRpcPacketSize);
-    return addr;
-}
-
-static uint32_t rpcAllocServerAddr(uint8_t *rdram)
-{
-    if (kRpcServerPoolCount == 0)
-        return 0;
-
-    uint32_t slot = g_rpc_server_index++ % kRpcServerPoolCount;
-    uint32_t addr = kRpcServerPoolBase + (slot * kRpcServerStride);
-    rpcZeroRdram(rdram, addr, kRpcServerStride);
-    return addr;
+    const uint32_t slot = g_rpc_server_index++ % kIopRpcServerHandleCount;
+    return kIopRpcServerHandleBase + 2u * slot;
 }
 
 inline std::string translatePs2Path(const char *ps2Path)

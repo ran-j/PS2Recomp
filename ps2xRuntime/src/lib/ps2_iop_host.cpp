@@ -220,18 +220,12 @@ bool PS2IopHostAdapter::normalizeIopAddress(uint32_t address, uint32_t &normaliz
     return true;
 }
 
-uint32_t PS2IopHostAdapter::allocateIopHandle(ps2x::iop::IopHandleKind kind)
+uint32_t PS2IopHostAdapter::allocateIopHandle(ps2x::iop::IopHandleKind)
 {
-    uint8_t *const rdram = m_activeRdram
-                               ? m_activeRdram
-                               : m_runtime.memory().getRDRAM();
-    if (!rdram)
-    {
-        return 0;
-    }
-    return kind == ps2x::iop::IopHandleKind::RpcPacket
-               ? rpcAllocPacketAddr(rdram)
-               : rpcAllocServerAddr(rdram);
+    // The EE names an IOP-side object by an opaque handle, never by EE memory
+    // carved out of the title's RAM.
+    std::lock_guard<std::mutex> lock(g_rpc_mutex);
+    return rpcNextIopServerHandleLocked();
 }
 
 uint32_t PS2IopHostAdapter::allocateGuest(uint32_t size, uint32_t alignment)

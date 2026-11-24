@@ -156,7 +156,13 @@ static constexpr uint32_t kFioSoIXOth = 0x0001;
 struct RpcServerState
 {
     uint32_t sid = 0;
-    uint32_t sd_ptr = 0; // PS2 address
+    // What the guest sees in cd->server. For a server the guest registered on
+    // the EE (SifRegisterRpc) it is the guest's own descriptor, which bind and
+    // call fill in as the EE sifrpc library does. For a server on the IOP it is
+    // an opaque handle: the descriptor lives in IOP RAM, the guest only tests
+    // cd->server against 0, and the runtime keeps nothing for it in EE RAM.
+    uint32_t sd_ptr = 0;
+    bool eeDescriptor = false;
 };
 
 struct RpcClientState
@@ -213,7 +219,6 @@ inline std::mutex g_rpc_mutex;
 inline std::recursive_mutex g_sif_call_rpc_mutex;
 inline bool g_rpc_initialized = false;
 inline uint32_t g_rpc_next_id = 1;
-inline uint32_t g_rpc_packet_index = 0;
 inline uint32_t g_rpc_server_index = 0;
 inline uint32_t g_rpc_active_queue = 0;
 inline std::mutex g_bootmode_mutex;
@@ -242,14 +247,11 @@ inline std::filesystem::path g_host_cwd;
 inline std::filesystem::path g_cdrom_cwd;
 inline std::string g_ps2_cwd_device = "host0";
 
-static constexpr uint32_t kRpcPacketSize = 64;
-static constexpr uint32_t kRpcPacketPoolBase = 0x01F00000;
-static constexpr uint32_t kRpcPacketPoolBytes = 0x00010000;
-static constexpr uint32_t kRpcPacketPoolCount = kRpcPacketPoolBytes / kRpcPacketSize;
-static constexpr uint32_t kRpcServerPoolBase = 0x01F10000;
-static constexpr uint32_t kRpcServerPoolBytes = 0x00010000;
-static constexpr uint32_t kRpcServerStride = 0x80;
-static constexpr uint32_t kRpcServerPoolCount = kRpcServerPoolBytes / kRpcServerStride;
+// cd->server values for IOP-side servers. Odd, so nothing can take one for a
+// word-aligned descriptor, and inside EE kernel RAM, below the first address
+// a title can own, so even a stray dereference cannot reach title memory.
+static constexpr uint32_t kIopRpcServerHandleBase = 0x0007FF01u;
+static constexpr uint32_t kIopRpcServerHandleCount = 0x80u;
 
 static constexpr uint32_t kTlsPoolBase = 0x01F20000;
 static constexpr uint32_t kTlsPoolBytes = 0x00010000;
