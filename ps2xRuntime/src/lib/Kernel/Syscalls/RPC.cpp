@@ -1,6 +1,9 @@
 #include "Common.h"
 #include "RPC.h"
 #include "../../ps2_iop_transport.h"
+#include "../Stubs/SIF.h"
+
+#include <array>
 
 namespace ps2_syscalls
 {
@@ -295,12 +298,22 @@ namespace ps2_syscalls
             g_rpc_clients[clientPtr].sid = rpcId;
         }
 
-        if (!serverPtr && PS2IopTransport::canBindRpc(runtime, rpcId))
+        if (!serverPtr && ((rpcId & 0x80000000u) != 0u || PS2IopTransport::canBindRpc(runtime, rpcId)))
         {
             // EE-side servers and HLE routes need a descriptor in guest RAM.
             // With an emulated IOP, only publish it after the IRX has actually
             // registered the SID; cd->server == nullptr is the SDK's retry
             // signal while the IOP server thread is still starting.
+            //
+            // Games' IOP glue uses sids with bit31 set (the temporary
+            // per-function sids the game's own IOP modules serve. No emulated
+            // module registers them, and a refused bind leaves the game's
+            // SDK glue polling cd->server forever (the 1M-iteration retry in
+            // sub_49F840 through the SifBindRpc override at sub_49DE00 froze
+            // the boot thread at pc 0x49f900 with loading stuck at 199 CD
+            // reads). Allocate the descriptor so the handshake completes;
+            // calls on these sids then resolve through the normal HLE /
+            // unhandled paths.
             serverPtr = rpcAllocServerAddr(rdram);
             if (serverPtr)
             {
@@ -602,7 +615,21 @@ namespace ps2_syscalls
                 }
                 else if (!handled)
                 {
-                    rpcZeroRdram(rdram, receiveBuffer, receiveSize);
+                    // The boot handshake asks the
+                    // IOP side for its 4-byte version tag with rpc 0xFF and only
+                    // accepts "2800" (compared in sub_49F940 against the
+                    // constant at 0x51B234). With no IOP server behind the
+                    // dynamic sid, answer the accepted tag instead of zeros so
+                    // the module queries complete instead of failing the match.
+                    static constexpr uint8_t kGlueVersionTag[4] = {'2', '8', '0', '0'};
+                    if (rpcNum == 0xFFu && receiveSize == 4u && sendBuf == 0u && receiveBuffer != 0u)
+                    {
+                        std::memcpy(rdram + receiveBuffer, kGlueVersionTag, sizeof(kGlueVersionTag));
+                    }
+                    else
+                    {
+                        rpcZeroRdram(rdram, receiveBuffer, receiveSize);
+                    }
                     zeroedFallback = true;
                 }
             }
@@ -994,6 +1021,38 @@ namespace ps2_syscalls
                                                  << " psize=0x" << packetSize
                                                  << " extra=0x" << destExtra << std::dec << std::endl);
             ++logCount;
+        }
+
+        // The loader's stream-request queue (producer
+        // sub_00360408 -> sub_0036E110, consumer thread entry 0x36E578) posts
+        // 48-byte requests with cid=0 and the loader blocks in sub_0036E3E8
+        // until a completion reply zeroes the request record's seq word
+        // (sub_0036E4A0, reached from the SIF-cmd handler sub_0036C1A8 that
+        // the game registers with sceSifAddCmdHandler(cid=1) at 0x36CD50).
+        // No loaded IOP module serves cid=0, so that reply never comes back
+        // and the LOADING poll spins forever. Answer the handshake the absent
+        // IOP side would answer: echo a completion reply whose [+0xC] is the
+        // request handle (the request packet's +0x14 seq word; its high byte
+        // selects the request bucket) and whose [+0x10] = 2, the "complete the
+        // bucket record" branch of sub_0036C1A8. cid!=0 traffic (the game's
+        // own reply direction) is never echoed.
+        if (cid == 0u && packetSize >= 0x18u && packetAddr != 0u)
+        {
+            uint32_t requestHandle = 0u;
+            (void)readStackU32(rdram, packetAddr, 0x14u, requestHandle);
+            if (requestHandle != 0u)
+            {
+                // 32 bytes: sub_0036C1A8 reads +0xC and +0x10, and the SIF-cmd
+                // header alone is 16 bytes - keep the status word inside the
+                // copied payload.
+                std::array<uint8_t, 32> reply{};
+                reply[0x0Cu] = static_cast<uint8_t>(requestHandle & 0xFFu);
+                reply[0x0Du] = static_cast<uint8_t>((requestHandle >> 8) & 0xFFu);
+                reply[0x0Eu] = static_cast<uint8_t>((requestHandle >> 16) & 0xFFu);
+                reply[0x0Fu] = static_cast<uint8_t>((requestHandle >> 24) & 0xFFu);
+                reply[0x10u] = 2u;
+                ps2_stubs::dispatchSifCommand(rdram, runtime, 1u, reply.data(), reply.size());
+            }
         }
 
         // Return non-zero on success.
