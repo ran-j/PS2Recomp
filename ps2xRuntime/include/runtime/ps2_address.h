@@ -47,7 +47,9 @@ static inline constexpr bool Ps2IsPhysicalSpecialAddress(uint32_t physAddr)
            Ps2AddressInRange(physAddr, PS2_SCRATCHPAD_BASE, PS2_SCRATCHPAD_SIZE) ||
            Ps2AddressInRange(physAddr, PS2_IO_BASE, PS2_IO_SIZE) ||
            Ps2AddressInRange(physAddr, PS2_GS_PRIV_REG_BASE, PS2_GS_PRIV_REG_SIZE) ||
-           (physAddr >= PS2_VU0_DATA_BASE && physAddr < (PS2_VU1_CODE_BASE + PS2_VU1_CODE_SIZE));
+           // All four VU memories (VU0 code 0x11000000 .. VU1 data end 0x11010000) must take the slow
+           // path; otherwise VU0 microcode and VU1 data writes land in main RAM at 0x01000000+.
+           (physAddr >= PS2_VU0_CODE_BASE && physAddr < (PS2_VU1_DATA_BASE + PS2_VU1_DATA_SIZE));
 }
 
 static inline constexpr bool Ps2IsSpecialAddress(uint32_t addr)
