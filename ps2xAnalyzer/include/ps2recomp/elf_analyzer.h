@@ -61,6 +61,15 @@ namespace ps2recomp
         static std::vector<JumpTable> detectJumpTablesForHeuristics(const std::vector<Instruction> &instructions, const std::vector<Section> &sections, const std::function<bool(uint32_t, uint32_t &)> &readWord);
         static std::unordered_set<std::string> findRecursiveFunctionsForHeuristics(const std::unordered_map<std::string, std::vector<std::string>> &callGraph);
 
+    public:
+        static bool looksLikeFunctionPrologueForHeuristics(uint32_t instructionWord);
+        static std::vector<uint32_t> findDataReferencedEntryCandidatesForHeuristics(
+            const std::vector<Section> &sections,
+            uint32_t textStart,
+            uint32_t textEnd,
+            const std::unordered_set<uint32_t> &knownStarts,
+            const std::unordered_set<uint32_t> &servedTargets = {});
+
     private:
         std::string m_elfPath;
         std::unique_ptr<ElfParser> m_elfParser;
@@ -106,6 +115,7 @@ namespace ps2recomp
         void analyzeEntryPoint();
         void analyzeLibraryFunctions();
         void analyzeDataUsage();
+        void analyzeDataReferencedEntryPoints();
 
         void identifyPotentialPatches();
         bool tryPatchSelfModifyingStore(const Function &func,
