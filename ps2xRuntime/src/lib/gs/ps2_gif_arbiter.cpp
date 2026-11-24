@@ -38,20 +38,11 @@ void GifArbiter::drain()
     if (!m_processFn)
         return;
 
-    std::stable_sort(m_queue.begin(), m_queue.end(),
-                     [](const GifArbiterPacket &a, const GifArbiterPacket &b)
-                     {
-                         // DIRECTHL cannot preempt PATH3 IMAGE transfers.
-                         if (a.path2DirectHl != b.path2DirectHl || a.path3Image != b.path3Image)
-                         {
-                             if (a.path3Image && b.path2DirectHl)
-                                 return true;
-                             if (a.path2DirectHl && b.path3Image)
-                                 return false;
-                         }
-                         return pathPriority(a.pathId) < pathPriority(b.pathId);
-                     });
-
+    // Packets are handed over in submission order. The runtime performs every
+    // transfer synchronously, so packets queued between drains were issued at
+    // different times, not raced for the bus at once. Sorting them by path
+    // priority ran all PATH1 draws before the PATH3 texture uploads that
+    // preceded them, so draws sampled stale textures.
     for (size_t i = 0; i < m_queue.size(); ++i)
     {
         auto &pkt = m_queue[i];
