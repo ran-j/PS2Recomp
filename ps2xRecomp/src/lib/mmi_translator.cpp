@@ -107,12 +107,13 @@ namespace ps2recomp
                 "SET_GPR_U64(ctx, {}, out); "
                 "}}",
                 rs, rd);
+        // EE halfword shifts use sa[3:0]; SSE zeroes/sign-fills counts above 15.
         case MMI_PSLLH:
-            return fmt::format("SET_GPR_VEC(ctx, {}, _mm_slli_epi16(GPR_VEC(ctx, {}), {}));", rd, rt, sa);
+            return fmt::format("SET_GPR_VEC(ctx, {}, _mm_slli_epi16(GPR_VEC(ctx, {}), {}));", rd, rt, sa & 0xF);
         case MMI_PSRLH:
-            return fmt::format("SET_GPR_VEC(ctx, {}, _mm_srli_epi16(GPR_VEC(ctx, {}), {}));", rd, rt, sa);
+            return fmt::format("SET_GPR_VEC(ctx, {}, _mm_srli_epi16(GPR_VEC(ctx, {}), {}));", rd, rt, sa & 0xF);
         case MMI_PSRAH:
-            return fmt::format("SET_GPR_VEC(ctx, {}, _mm_srai_epi16(GPR_VEC(ctx, {}), {}));", rd, rt, sa);
+            return fmt::format("SET_GPR_VEC(ctx, {}, _mm_srai_epi16(GPR_VEC(ctx, {}), {}));", rd, rt, sa & 0xF);
         case MMI_PSLLW:
             return fmt::format("SET_GPR_VEC(ctx, {}, _mm_slli_epi32(GPR_VEC(ctx, {}), {}));", rd, rt, sa);
         case MMI_PSRLW:
