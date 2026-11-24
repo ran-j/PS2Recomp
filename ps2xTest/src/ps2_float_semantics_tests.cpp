@@ -120,6 +120,39 @@ void register_ps2_float_semantics_tests()
             }
         });
 
+        tc.Run("a zero host result takes the fast path and matches the out-of-line path", [](TestCase &t)
+        {
+            // Zero, both signs of zero, denormals, the smallest normals, ordinary values and exponent 255.
+            const uint32_t magnitudes[] = {0x00000000u, 0x00000001u, 0x007FFFFFu, 0x00800000u, 0x00800001u,
+                                           0x3F800000u, 0x40000000u, 0x7F7FFFFFu, 0x7F800000u, 0x7FFFFFFFu};
+            for (uint32_t ma : magnitudes)
+            {
+                for (uint32_t mb : magnitudes)
+                {
+                    for (uint32_t signs = 0; signs < 4; ++signs)
+                    {
+                        const float a = floatOf(ma | ((signs & 1u) ? 0x80000000u : 0u));
+                        const float b = floatOf(mb | ((signs & 2u) ? 0x80000000u : 0u));
+                        const std::string at = std::string("operands ") + std::to_string(bitsOf(a)) + ", " + std::to_string(bitsOf(b));
+                        if (a + b == 0.0f)
+                            t.Equals(bitsOf(FPU_ADD_S(a, b)), bitsOf(ps2_fadd_slow(a, b)), "add " + at);
+                        if (a - b == 0.0f)
+                            t.Equals(bitsOf(FPU_SUB_S(a, b)), bitsOf(ps2_fsub_slow(a, b)), "sub " + at);
+                        if (a * b == 0.0f)
+                            t.Equals(bitsOf(FPU_MUL_S(a, b)), bitsOf(ps2_fmul_slow(a, b)), "mul " + at);
+                    }
+                }
+            }
+        });
+
+        tc.Run("ps2_fnormal accepts a zero result and rejects a denormal one", [](TestCase &t)
+        {
+            // The macro tests above give the same bits on either path, so only this predicate pins the fast path.
+            t.IsTrue(ps2_fnormal(floatOf(0x00000000u)), "+0 stays on the fast path");
+            t.IsTrue(ps2_fnormal(floatOf(0x80000000u)), "-0 stays on the fast path");
+            t.IsFalse(ps2_fnormal(floatOf(0x00000001u)), "a denormal result takes the out-of-line path");
+        });
+
         tc.Run("exponent 255 is an ordinary exponent, not Inf or NaN", [](TestCase &t)
         {
             const float twoPow128 = floatOf(kTwoPow128);
