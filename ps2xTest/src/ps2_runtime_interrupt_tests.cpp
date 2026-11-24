@@ -72,6 +72,11 @@ namespace
     constexpr uint32_t kInvocationQueuePc = 0x00160530u;
     constexpr uint32_t kInvocationQueueResumePc = 0x00160540u;
     constexpr uint32_t kInvocationQueueHandlerPc = 0x00160550u;
+    constexpr uint32_t kSequenceMainPc = 0x00160560u;
+    constexpr uint32_t kSequenceResumePc = 0x00160570u;
+    constexpr uint32_t kSequenceMemberPc = 0x00160580u;
+    constexpr uint32_t kSequenceCount = 48u;
+    constexpr uint32_t kSequencePresetSp = 0x001D0000u;
 
     constexpr uint32_t kTimer2Count = 0x10001000u;
     constexpr uint32_t kTimer2Mode = 0x10001010u;
@@ -97,6 +102,10 @@ namespace
     uint32_t g_invocationQueueRuns = 0u;
     uint32_t g_invocationQueueSp = 0u;
     bool g_invocationQueueSpChanged = false;
+    std::vector<uint32_t> g_sequenceOrder;
+    std::vector<uint32_t> g_sequenceSps;
+    uint32_t g_sequenceExpectedSp = 0u;
+    uint32_t g_sequencePresetIndex = ~0u;
 
     void setRegU32(R5900Context &ctx, int reg, uint32_t value)
     {
@@ -373,6 +382,68 @@ namespace
         ctx->pc = 0u;
         runtime->requestStop();
     }
+
+    void schedulerSequenceMember(uint8_t *, R5900Context *ctx, PS2Runtime *)
+    {
+        g_sequenceOrder.push_back(getRegU32(ctx, 4));
+        g_sequenceSps.push_back(getRegU32(ctx, 29));
+        ctx->pc = 0u;
+    }
+
+    void schedulerSequenceMain(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        EeScheduler &scheduler = runtime->eeScheduler();
+        g_sequenceExpectedSp = scheduler.invocationStackTop();
+        std::vector<GuestInvocation> invocations;
+        for (uint32_t i = 0u; i < kSequenceCount; ++i)
+        {
+            GuestInvocation invocation{};
+            invocation.kind = GuestInvocationKind::Interrupt;
+            invocation.tag = i;
+            invocation.context.pc = kSequenceMemberPc;
+            setRegU32(invocation.context, 4, i);
+            setRegU32(invocation.context, 29, i == g_sequencePresetIndex ? kSequencePresetSp : 0u);
+            setRegU32(invocation.context, 31, 0u);
+            invocations.push_back(std::move(invocation));
+        }
+        ctx->pc = kSequenceResumePc;
+        scheduler.invokeCurrentSequence(std::move(invocations));
+    }
+
+    void schedulerSequenceResume(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        ctx->pc = 0u;
+        runtime->requestStop();
+    }
+
+    bool runInvocationSequence(TestEnv &env, uint32_t presetIndex)
+    {
+        env.runtime.registerFunction(kSequenceMainPc, schedulerSequenceMain);
+        env.runtime.registerFunction(kSequenceResumePc, schedulerSequenceResume);
+        env.runtime.registerFunction(kSequenceMemberPc, schedulerSequenceMember);
+
+        g_sequenceOrder.clear();
+        g_sequenceSps.clear();
+        g_sequenceExpectedSp = 0u;
+        g_sequencePresetIndex = presetIndex;
+
+        R5900Context mainContext{};
+        mainContext.pc = kSequenceMainPc;
+        env.runtime.eeScheduler().reset(env.rdram.data(), mainContext);
+        try
+        {
+            env.runtime.eeScheduler().run();
+        }
+        catch (const std::runtime_error &error)
+        {
+            if (std::string_view(error.what()) != "EE invocation stack space exhausted")
+            {
+                throw;
+            }
+            return false;
+        }
+        return true;
+    }
 }
 
 void register_ps2_runtime_interrupt_tests()
@@ -600,6 +671,48 @@ void register_ps2_runtime_interrupt_tests()
             t.IsFalse(exhausted, "queued callbacks must not consume one invocation stack per pending item");
             t.Equals(g_invocationQueueRuns, 96u, "every queued callback should execute exactly once");
             t.IsFalse(g_invocationQueueSpChanged, "sequential callbacks should reuse the same stack depth");
+        });
+
+        tc.Run("invocation sequence members share one stack", [](TestCase &t)
+        {
+            TestEnv env;
+            const bool completed = runInvocationSequence(env, ~0u);
+
+            t.IsTrue(completed, "a long invocation sequence must not exhaust invocation stack space");
+            t.Equals(static_cast<uint32_t>(g_sequenceOrder.size()), kSequenceCount,
+                     "every sequence member should run exactly once");
+            for (uint32_t i = 0u; i < g_sequenceOrder.size(); ++i)
+            {
+                t.Equals(g_sequenceOrder[i], i, "sequence members should run in order");
+            }
+            t.IsTrue(g_sequenceExpectedSp != 0u, "the sequence's starting depth should have a stack");
+            uint32_t sharedSpCount = 0u;
+            for (const uint32_t sp : g_sequenceSps)
+            {
+                sharedSpCount += sp == g_sequenceExpectedSp ? 1u : 0u;
+            }
+            t.Equals(sharedSpCount, kSequenceCount,
+                     "every sequence member should run on the stack for the depth the sequence starts at");
+        });
+
+        tc.Run("invocation sequence members keep a preset stack", [](TestCase &t)
+        {
+            TestEnv env;
+            constexpr uint32_t kPresetIndex = kSequenceCount / 2u;
+            const bool completed = runInvocationSequence(env, kPresetIndex);
+
+            t.IsTrue(completed, "a long invocation sequence must not exhaust invocation stack space");
+            t.Equals(static_cast<uint32_t>(g_sequenceSps.size()), kSequenceCount,
+                     "every sequence member should run exactly once");
+            if (g_sequenceSps.size() == kSequenceCount)
+            {
+                t.Equals(g_sequenceSps[kPresetIndex], kSequencePresetSp,
+                         "a member with its own sp should keep it");
+                t.Equals(g_sequenceSps[kPresetIndex - 1u], g_sequenceExpectedSp,
+                         "the member before the preset one should use the shared stack");
+                t.Equals(g_sequenceSps[kPresetIndex + 1u], g_sequenceExpectedSp,
+                         "the member after the preset one should use the shared stack");
+            }
         });
 
         tc.Run("iSignalSema defers selection until IRQ return", [](TestCase &t)
