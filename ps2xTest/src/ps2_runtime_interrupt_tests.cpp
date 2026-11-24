@@ -72,6 +72,10 @@ namespace
     constexpr uint32_t kInvocationQueuePc = 0x00160530u;
     constexpr uint32_t kInvocationQueueResumePc = 0x00160540u;
     constexpr uint32_t kInvocationQueueHandlerPc = 0x00160550u;
+    constexpr uint32_t kDiIrqRaisePc = 0x00160700u;
+    constexpr uint32_t kDiIrqResumePc = 0x00160710u;
+    constexpr uint32_t kDiIrqHandlerPc = 0x00160720u;
+    constexpr uint32_t kDiIrqCause = 9u;
 
     constexpr uint32_t kTimer2Count = 0x10001000u;
     constexpr uint32_t kTimer2Mode = 0x10001010u;
@@ -222,6 +226,37 @@ namespace
 
     void schedulerIrqStackResume(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
     {
+        ctx->pc = 0u;
+        runtime->requestStop();
+    }
+
+    void schedulerDiIrqRaise(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        g_dispatchTrace.push_back(1);
+        ctx->cop0_status &= ~0x10000u; // DI
+        EeScheduler &scheduler = runtime->eeScheduler();
+        scheduler.addIrqHandler(false, kDiIrqCause, kDiIrqHandlerPc, true, 0u, 0u, 0u);
+        scheduler.dispatchIrq(false, kDiIrqCause);
+        ctx->pc = kDiIrqResumePc;
+    }
+
+    void schedulerDiIrqHandler(uint8_t *, R5900Context *ctx, PS2Runtime *)
+    {
+        g_dispatchTrace.push_back(3);
+        ctx->pc = 0u;
+    }
+
+    void schedulerDiIrqResume(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        if (g_dispatchTrace.size() == 1u)
+        {
+            // Still inside the DI section: the handler must not have run. EI and continue.
+            g_dispatchTrace.push_back(2);
+            ctx->cop0_status |= 0x10000u; // EI
+            ctx->pc = kDiIrqResumePc;
+            return;
+        }
+        g_dispatchTrace.push_back(4);
         ctx->pc = 0u;
         runtime->requestStop();
     }
@@ -600,6 +635,24 @@ void register_ps2_runtime_interrupt_tests()
             t.IsFalse(exhausted, "queued callbacks must not consume one invocation stack per pending item");
             t.Equals(g_invocationQueueRuns, 96u, "every queued callback should execute exactly once");
             t.IsFalse(g_invocationQueueSpChanged, "sequential callbacks should reuse the same stack depth");
+        });
+
+        tc.Run("interrupts are held while the guest has them disabled with DI", [](TestCase &t)
+        {
+            TestEnv env;
+            env.runtime.registerFunction(kDiIrqRaisePc, schedulerDiIrqRaise);
+            env.runtime.registerFunction(kDiIrqResumePc, schedulerDiIrqResume);
+            env.runtime.registerFunction(kDiIrqHandlerPc, schedulerDiIrqHandler);
+
+            g_dispatchTrace.clear();
+            R5900Context mainContext{};
+            mainContext.pc = kDiIrqRaisePc;
+            env.runtime.eeScheduler().reset(env.rdram.data(), mainContext);
+            env.runtime.eeScheduler().run();
+
+            const std::vector<int> expected{1, 2, 3, 4};
+            t.IsTrue(g_dispatchTrace == expected,
+                     "the handler should run at the first dispatch point after EI, not inside the DI section");
         });
 
         tc.Run("iSignalSema defers selection until IRQ return", [](TestCase &t)
